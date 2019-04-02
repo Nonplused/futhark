@@ -6,4 +6,4 @@
 
 let f [n] (xs: [][n]i32) = \(ys: [][n]i32) -> (xs, ys)
 
-let main (xs: [][]i32) (ys: [][]i32) = f xs ys
+let main [n] (xs: [][n]i32) (ys: [][n]i32) = f xs ys

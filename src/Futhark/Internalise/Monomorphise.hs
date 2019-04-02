@@ -435,7 +435,7 @@ monomorphizeBinding entry (PolyBinding rr (name, tparams, params, retdecl, retty
 
   mapM_ noticeDims $ rettype : map patternStructType params''
 
-  body' <- updateExpTypes (`M.lookup` M.map (fmap toStructural) substs') body
+  body' <- updateExpTypes (`M.lookup` substs') body
   body'' <- withRecordReplacements (mconcat rrs) $ transformExp body'
   name' <- if null tparams then return name else newName name
   return (name', toValBinding t_shape_params name' params'' rettype' body'')

@@ -41,12 +41,14 @@ module Language.Futhark.Attributes
   , aliases
   , diet
   , arrayRank
+  , arrayShape
   , nestedDims
   , orderZero
   , unfoldFunType
   , foldFunType
   , typeVars
   , typeDimNames
+  , typeDimNamesPos
 
   -- * Operations on types
   , rank
@@ -549,6 +551,20 @@ typeDimNames = foldMap dimName . nestedDims
   where dimName :: DimDecl VName -> S.Set VName
         dimName (NamedDim qn) = S.singleton $ qualLeaf qn
         dimName _             = mempty
+
+-- | Extract all the shape names that occur in positive position
+-- (roughly, left side of an arrow) in a given type.
+typeDimNamesPos :: TypeBase (DimDecl VName) als -> S.Set VName
+typeDimNamesPos (Arrow _ _ t1 t2) = onParam t1 <> typeDimNamesPos t2
+  where onParam :: TypeBase (DimDecl VName) als -> S.Set VName
+        onParam Arrow{} = mempty
+        onParam (Record fs) = mconcat $ map onParam $ M.elems fs
+        onParam (TypeVar _ _ _ targs) = mconcat $ map onTypeArg targs
+        onParam t = typeDimNames t
+        onTypeArg (TypeArgDim (NamedDim d) _) = S.singleton $ qualLeaf d
+        onTypeArg (TypeArgDim _ _) = mempty
+        onTypeArg (TypeArgType t _) = onParam t
+typeDimNamesPos _ = mempty
 
 -- | @patternOrderZero pat@ is 'True' if all of the types in the given pattern
 -- have order 0.

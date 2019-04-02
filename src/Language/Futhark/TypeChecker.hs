@@ -14,7 +14,7 @@ module Language.Futhark.TypeChecker
   , initialEnv
   )
   where
-
+import Debug.Trace
 import Control.Monad.Except
 import Control.Monad.Writer
 import Data.List
@@ -696,22 +696,26 @@ matchMTys = matchMTys' mempty
              -> VName -> BoundV
              -> VName -> BoundV
              -> Either TypeError (VName, VName)
-    matchVal loc spec_name spec_t name t
-      | matchFunBinding loc spec_t t = return (spec_name, name)
-    matchVal loc spec_name spec_v _ v =
-      Left $ TypeError loc $ unlines $
-      ["Module type specifies"] ++
-      map ("  "++) (lines $ ppValBind spec_name spec_v) ++
-      ["but module provides"] ++
-      map ("  "++) (lines $ppValBind spec_name v)
+    matchVal loc spec_name spec_v name v =
+      case matchValBinding loc spec_v v of
+        Nothing -> return (spec_name, name)
+        Just problem ->
+          Left $ TypeError loc $ unlines $
+          ["Module type specifies"] ++
+          map ("  "++) (lines $ ppValBind spec_name spec_v) ++
+          ["but module provides"] ++
+          map ("  "++) (lines $ ppValBind spec_name v) ++
+          maybe [] lines problem
 
-    matchFunBinding :: SrcLoc -> BoundV -> BoundV -> Bool
-    matchFunBinding loc (BoundV _ orig_spec_t) (BoundV tps orig_t) =
-      -- Would be nice if we could propagate the actual error here.
-      case doUnification loc tps
-           (toStructural orig_spec_t) (toStructural orig_t) of
-        Left _ -> False
-        Right t -> t `subtypeOf` toStructural orig_spec_t
+    matchValBinding :: SrcLoc -> BoundV -> BoundV -> Maybe (Maybe String)
+    matchValBinding loc (BoundV _ orig_spec_t) (BoundV tps orig_t) =
+      case doUnification loc tps (toStruct orig_spec_t) (toStruct orig_t) of
+        Left err -> Just $ Just $ show err
+        -- Even if they unify, we still have to verify the uniqueness
+        -- properties.
+        Right t | anyDimShapeAnnotations t `subtypeOf`
+                  anyDimShapeAnnotations orig_spec_t -> Nothing
+                | otherwise -> Just Nothing
 
     missingType loc name =
       Left $ TypeError loc $
