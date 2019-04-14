@@ -225,7 +225,7 @@ instance Annotations ExplicitMemory where
   type LParamAttr ExplicitMemory = MemInfo SubExp NoUniqueness MemBind
   type RetType    ExplicitMemory = FunReturns
   type BranchType ExplicitMemory = BodyReturns
-  type Op         ExplicitMemory = MemOp (HostOp ExplicitMemory (Kernel InKernel))
+  type Op         ExplicitMemory = MemOp (HostOp ExplicitMemory ())
 
 instance Annotations InKernel where
   type LetAttr    InKernel = MemInfo SubExp NoUniqueness MemBind
@@ -496,7 +496,7 @@ bodyReturnsToExpReturns = noUniquenessReturns . maybeReturns
 
 instance TC.CheckableOp ExplicitMemory where
   checkOp (Alloc size _) = TC.require [Prim int64] size
-  checkOp (Inner op) = typeCheckHostOp (TC.subCheck . typeCheckKernel) op
+  checkOp (Inner op) = typeCheckHostOp (const $ return ()) op
 
 instance TC.CheckableOp InKernel where
   checkOp (Alloc size _) = TC.require [Prim int64] size
@@ -985,17 +985,28 @@ class TypedOp (Op lore) => OpReturns lore where
                Op lore -> m [ExpReturns]
   opReturns op = extReturns <$> opType op
 
+segOpReturns :: (Monad m, HasScope ExplicitMemory m) =>
+                SegOp ExplicitMemory -> m [ExpReturns]
+segOpReturns k@(SegMap _ _ _ kbody) =
+  kernelBodyReturns kbody =<< (extReturns <$> opType k)
+segOpReturns k@(SegRed _ _ _ _ _ _ kbody) =
+  kernelBodyReturns kbody =<< (extReturns <$> opType k)
+segOpReturns k@(SegScan _ _ _ _ _ kbody) =
+  kernelBodyReturns kbody =<< (extReturns <$> opType k)
+segOpReturns (SegGenRed _ _ ops _ _) =
+  concat <$> mapM (mapM varReturns . genReduceDest) ops
+
+kernelBodyReturns :: (HasScope ExplicitMemory m, Monad m) =>
+                     KernelBody ExplicitMemory -> [ExpReturns] -> m [ExpReturns]
+kernelBodyReturns = zipWithM correct . kernelBodyResult
+  where correct (WriteReturn _ arr _) _ = varReturns arr
+        correct _ ret = return ret
+
 instance OpReturns ExplicitMemory where
   opReturns (Alloc _ space) =
     return [MemMem space]
-  opReturns (Inner (HostOp k@(Kernel _ _ _ body))) =
-    zipWithM correct (kernelBodyResult body) =<< (extReturns <$> opType k)
-    where correct (WriteReturn _ arr _) _ = varReturns arr
-          correct _ ret = return ret
-  opReturns (Inner (HostOp (SegGenRed _ ops _ _))) =
-    concat <$> mapM (mapM varReturns . genReduceDest) ops
-  opReturns k =
-    extReturns <$> opType k
+  opReturns (Inner (SegOp op)) = segOpReturns op
+  opReturns k = extReturns <$> opType k
 
 instance OpReturns InKernel where
   opReturns (Alloc _ space) =

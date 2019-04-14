@@ -59,8 +59,8 @@ opCompiler (Pattern _ [pe]) (Inner (CmpSizeLe key size_class x)) = do
     =<< toExp x
 opCompiler (Pattern _ [pe]) (Inner (GetSizeMax size_class)) =
   sOp $ Imp.GetSizeMax (patElemName pe) size_class
-opCompiler dest (Inner (HostOp kernel)) =
-  kernelCompiler dest kernel
+opCompiler dest (Inner (SegOp op)) =
+  segOpCompiler dest op
 opCompiler pat e =
   compilerBugS $ "opCompiler: Invalid pattern\n  " ++
   pretty pat ++ "\nfor expression\n  " ++ pretty e
@@ -71,40 +71,17 @@ sizeClassWithEntryPoint fname (Imp.SizeThreshold path) =
   where f (name, x) = (keyWithEntryPoint fname name, x)
 sizeClassWithEntryPoint _ size_class = size_class
 
-kernelCompiler :: Pattern ExplicitMemory -> Kernel InKernel
-               -> CallKernelGen ()
-
-kernelCompiler pat (Kernel desc space _ kernel_body) = do
-  (constants, init_constants) <- kernelInitialisation space
-
-  forM_ (kernelHints desc) $ \(s,v) -> do
-    ty <- case v of
-      Constant pv -> return $ Prim $ primValueType pv
-      Var vn -> lookupType vn
-    unless (primType ty) $ fail $ concat [ "debugKernelHint '", s, "'"
-                                         , " in kernel '", kernelName desc, "'"
-                                         , " did not have primType value." ]
-
-    toExp v >>= emit . Imp.DebugPrint s (elemType ty)
-
-  sKernel constants (kernelName desc) $ do
-    init_constants
-    compileKernelStms constants (kernelBodyStms kernel_body) $
-      zipWithM_ (compileKernelResult constants) (patternElements pat) $
-      kernelBodyResult kernel_body
-
-
-kernelCompiler pat (SegMap space _ body) =
-  compileSegMap pat space body
-
-kernelCompiler pat (SegRed space comm red_op nes _ body) =
-  compileSegRed pat space comm red_op nes body
-
-kernelCompiler pat (SegScan space red_op nes _ kbody) =
-  compileSegScan pat space red_op nes kbody
-
-kernelCompiler pat (SegGenRed space ops _ body) =
-  compileSegGenRed pat space ops body
+segOpCompiler :: Pattern ExplicitMemory -> SegOp ExplicitMemory -> CallKernelGen ()
+segOpCompiler pat (SegMap lvl space _ kbody) =
+  compileSegMap pat lvl space kbody
+segOpCompiler pat (SegRed lvl@SegThread{} space comm red_op nes _ kbody) =
+  compileSegRed pat lvl space comm red_op nes kbody
+segOpCompiler pat (SegScan lvl@SegThread{} space scan_op nes _ kbody) =
+  compileSegScan pat lvl space scan_op nes kbody
+segOpCompiler pat (SegGenRed (SegThread num_groups group_size) space ops _ kbody) =
+  compileSegGenRed pat num_groups group_size space ops kbody
+segOpCompiler pat _ =
+  compilerBugS $ "segOpCompiler: unexpected SegGroup for rhs of pattern " ++ pretty pat
 
 expCompiler :: ExpCompiler ExplicitMemory Imp.HostOp
 

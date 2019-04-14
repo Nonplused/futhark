@@ -33,7 +33,6 @@ import Futhark.Transform.Substitute
 import Futhark.Transform.Rename
 import Futhark.Optimise.Simplify.Lore
 import Futhark.Analysis.Metrics
-import qualified Futhark.Analysis.ScalExp as SE
 import qualified Futhark.Analysis.SymbolTable as ST
 import Futhark.Util.Pretty
   ((<+>), (</>), ppr, comma, commasep, Pretty, parens, text, apply, braces, annot, indent)
@@ -58,29 +57,7 @@ scopeOfCombineSpace :: CombineSpace -> Scope lore
 scopeOfCombineSpace (CombineSpace _ dims) =
   M.fromList $ zip (map fst dims) $ repeat $ IndexInfo Int32
 
-data KernelExp lore = SplitSpace SplitOrdering SubExp SubExp SubExp
-                      -- ^ @SplitSpace o w i elems_per_thread@.
-                      --
-                      -- Computes how to divide array elements to
-                      -- threads in a kernel.  Returns the number of
-                      -- elements in the chunk that the current thread
-                      -- should take.
-                      --
-                      -- @w@ is the length of the outer dimension in
-                      -- the array. @i@ is the current thread
-                      -- index. Each thread takes at most
-                      -- @elems_per_thread@ elements.
-                      --
-                      -- If the order @o@ is 'SplitContiguous', thread with index @i@
-                      -- should receive elements
-                      -- @i*elems_per_tread, i*elems_per_thread + 1,
-                      -- ..., i*elems_per_thread + (elems_per_thread-1)@.
-                      --
-                      -- If the order @o@ is @'SplitStrided' stride@,
-                      -- the thread will receive elements @i,
-                      -- i+stride, i+2*stride, ...,
-                      -- i+(elems_per_thread-1)*stride@.
-                    | Combine CombineSpace [Type] [(VName,SubExp)] (Body lore)
+data KernelExp lore = Combine CombineSpace [Type] [(VName,SubExp)] (Body lore)
                       -- ^ @Combine cspace ts aspace body@ will
                       -- combine values from threads to a single
                       -- (multidimensional) array.  If we define @(is,
@@ -155,8 +132,6 @@ instance Attributes lore => IsOp (KernelExp lore) where
   cheapOp _ = True
 
 instance Attributes lore => TypedOp (KernelExp lore) where
-  opType SplitSpace{} =
-    pure $ staticShapes [Prim int32]
   opType (Combine (CombineSpace scatter cspace) ts _ _) =
     pure $ staticShapes $
     zipWith arrayOfRow val_ts ws ++
@@ -180,8 +155,6 @@ instance FreeIn SplitOrdering where
   freeIn (SplitStrided stride) = freeIn stride
 
 instance Attributes lore => FreeIn (KernelExp lore) where
-  freeIn (SplitSpace o w i elems_per_thread) =
-    freeIn o <> freeIn [w, i, elems_per_thread]
   freeIn (Combine (CombineSpace scatter cspace) ts active body) =
     freeIn scatter <> freeIn (map snd cspace) <> freeIn ts <> freeIn active <> freeInBody body
   freeIn (GroupReduce w lam input) =
@@ -202,14 +175,9 @@ instance Attributes lore => FreeIn (GroupStreamLambda lore) where
                        map paramName (acc_params ++ arr_params)
 
 instance Ranged inner => RangedOp (KernelExp inner) where
-  opRanges (SplitSpace _ _ _ elems_per_thread) =
-    [(Just (ScalarBound 0),
-      Just (ScalarBound (SE.subExpToScalExp elems_per_thread int32)))]
   opRanges _ = repeat unknownRange
 
 instance (Attributes lore, Aliased lore) => AliasedOp (KernelExp lore) where
-  opAliases SplitSpace{} =
-    [mempty]
   opAliases Combine{} =
     [mempty]
   opAliases (GroupReduce _ lam _) =
@@ -239,7 +207,6 @@ instance (Attributes lore, Aliased lore) => AliasedOp (KernelExp lore) where
   consumedInOp (GroupGenReduce _ dests _ _ _ _) =
     S.fromList dests
 
-  consumedInOp SplitSpace{} = mempty
   consumedInOp Barrier{} = mempty
   consumedInOp (Combine _ _ _ body) = consumedInBody body
 
@@ -256,12 +223,6 @@ instance Substitute CombineSpace where
             (substituteNames substs w, n, substituteNames substs a)
 
 instance Attributes lore => Substitute (KernelExp lore) where
-  substituteNames subst (SplitSpace o w i elems_per_thread) =
-    SplitSpace
-    (substituteNames subst o)
-    (substituteNames subst w)
-    (substituteNames subst i)
-    (substituteNames subst elems_per_thread)
   substituteNames subst (Combine cspace ts active v) =
     Combine (substituteNames subst cspace) ts
     (substituteNames subst active) (substituteNames subst v)
@@ -302,12 +263,6 @@ instance Rename CombineSpace where
   rename = substituteRename
 
 instance Renameable lore => Rename (KernelExp lore) where
-  rename (SplitSpace o w i elems_per_thread) =
-    SplitSpace
-    <$> rename o
-    <*> rename w
-    <*> rename i
-    <*> rename elems_per_thread
   rename (Combine cspace ts active v) =
     Combine <$> rename cspace <*> rename ts <*> rename active <*> rename v
   rename (GroupReduce w lam input) =
@@ -337,8 +292,6 @@ instance (Attributes lore,
           CanBeAliased (Op lore)) => CanBeAliased (KernelExp lore) where
   type OpWithAliases (KernelExp lore) = KernelExp (Aliases lore)
 
-  addOpAliases (SplitSpace o w i elems_per_thread) =
-    SplitSpace o w i elems_per_thread
   addOpAliases (GroupReduce w lam input) =
     GroupReduce w (Alias.analyseLambda lam) input
   addOpAliases (GroupScan w lam input) =
@@ -368,8 +321,6 @@ instance (Attributes lore,
     GroupGenReduce w dests (removeLambdaAliases op) bucket vs locks
   removeOpAliases (Combine cspace ts active body) =
     Combine cspace ts active $ removeBodyAliases body
-  removeOpAliases (SplitSpace o w i elems_per_thread) =
-    SplitSpace o w i elems_per_thread
   removeOpAliases (Barrier ses) = Barrier ses
 
 instance (Attributes lore,
@@ -377,8 +328,6 @@ instance (Attributes lore,
           CanBeRanged (Op lore)) => CanBeRanged (KernelExp lore) where
   type OpWithRanges (KernelExp lore) = KernelExp (Ranges lore)
 
-  addOpRanges (SplitSpace o w i elems_per_thread) =
-    SplitSpace o w i elems_per_thread
   addOpRanges (GroupReduce w lam input) =
     GroupReduce w (Range.runRangeM $ Range.analyseLambda lam) input
   addOpRanges (GroupScan w lam input) =
@@ -408,8 +357,6 @@ instance (Attributes lore,
     GroupGenReduce w dests (removeLambdaRanges op) bucket vs locks
   removeOpRanges (Combine cspace ts active body) =
     Combine cspace ts active $ removeBodyRanges body
-  removeOpRanges (SplitSpace o w i elems_per_thread) =
-    SplitSpace o w i elems_per_thread
   removeOpRanges (Barrier ses) = Barrier ses
 
 instance (Attributes lore, CanBeWise (Op lore)) => CanBeWise (KernelExp lore) where
@@ -429,14 +376,11 @@ instance (Attributes lore, CanBeWise (Op lore)) => CanBeWise (KernelExp lore) wh
     GroupGenReduce w dests (removeLambdaWisdom op) bucket vs locks
   removeOpWisdom (Combine cspace ts active body) =
     Combine cspace ts active $ removeBodyWisdom body
-  removeOpWisdom (SplitSpace o w i elems_per_thread) =
-    SplitSpace o w i elems_per_thread
   removeOpWisdom (Barrier ses) = Barrier ses
 
 instance ST.IndexOp (KernelExp lore) where
 
 instance OpMetrics (Op lore) => OpMetrics (KernelExp lore) where
-  opMetrics SplitSpace{} = seen "SplitSpace"
   opMetrics Combine{} = seen "Combine"
   opMetrics (GroupReduce _ lam _) = inside "GroupReduce" $ lambdaMetrics lam
   opMetrics (GroupScan _ lam _) = inside "GroupScan" $ lambdaMetrics lam
@@ -450,12 +394,6 @@ instance OpMetrics (Op lore) => OpMetrics (KernelExp lore) where
 typeCheckKernelExp :: TC.Checkable lore => KernelExp (Aliases lore) -> TC.TypeM lore ()
 
 typeCheckKernelExp Barrier{} = return ()
-
-typeCheckKernelExp (SplitSpace o w i elems_per_thread) = do
-  case o of
-    SplitContiguous     -> return ()
-    SplitStrided stride -> TC.require [Prim int32] stride
-  mapM_ (TC.require [Prim int32]) [w, i, elems_per_thread]
 
 typeCheckKernelExp (Combine cspace@(CombineSpace scatter dims) ts aspace body) = do
   mapM_ (TC.require [Prim int32]) ws
@@ -555,11 +493,6 @@ instance Scoped lore (GroupStreamLambda lore) where
     scopeOfLParams (acc_params ++ arr_params)
 
 instance PrettyLore lore => Pretty (KernelExp lore) where
-  ppr (SplitSpace o w i elems_per_thread) =
-    text "splitSpace" <> suff <>
-    parens (commasep [ppr w, ppr i, ppr elems_per_thread])
-    where suff = case o of SplitContiguous     -> mempty
-                           SplitStrided stride -> text "Strided" <> parens (ppr stride)
   ppr (Combine (CombineSpace scatter cspace) ts active body) =
     text "combine" <>
     apply (map (\(_,n,a) -> text "@" <> ppr (n,a)) scatter ++

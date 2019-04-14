@@ -102,6 +102,7 @@ mkRegTileSe = constant
 --     }
 --
 doRegTiling3D :: Stm Kernels -> TileM (Maybe (Stms Kernels, Stm Kernels))
+{-
 doRegTiling3D (Let pat aux (Op (HostOp old_kernel)))
   | Kernel kerhint space kertp (KernelBody () kstms kres) <- old_kernel,
     FlatThreadSpace gspace <- spaceStructure space,
@@ -264,7 +265,7 @@ doRegTiling3D (Let pat aux (Op (HostOp old_kernel)))
 
         retThreadInSpace (ThreadsReturn (Var r)) = Just r
         retThreadInSpace _ = Nothing
-
+-}
 doRegTiling3D _ = return Nothing
 
 translateStreamsToLoop :: (Int32,VName,VName,SubExp,VName,VName,SubExp) ->

@@ -13,6 +13,7 @@ module Futhark.Representation.Kernels
        , module Futhark.Representation.Kernels.Kernel
        , module Futhark.Representation.Kernels.KernelExp
        , module Futhark.Representation.Kernels.Sizes
+       , module Futhark.Representation.SOACS.SOAC
        )
 where
 
@@ -23,6 +24,7 @@ import Futhark.Representation.Kernels.Sizes
 import Futhark.Representation.AST.Attributes
 import Futhark.Representation.AST.Traversals
 import Futhark.Representation.AST.Pretty
+import Futhark.Representation.SOACS.SOAC (SOAC, typeCheckSOAC)
 import Futhark.Binder
 import Futhark.Construct
 import qualified Futhark.TypeCheck as TypeCheck
@@ -34,7 +36,7 @@ import qualified Futhark.TypeCheck as TypeCheck
 data Kernels
 
 instance Annotations Kernels where
-  type Op Kernels = HostOp Kernels (Kernel InKernel)
+  type Op Kernels = HostOp Kernels (SOAC Kernels)
 instance Attributes Kernels where
   expTypesFromPattern = return . expExtTypesFromPattern
 
@@ -46,7 +48,7 @@ instance Attributes InKernel where
 instance PrettyLore InKernel where
 
 instance TypeCheck.CheckableOp Kernels where
-  checkOp = typeCheckHostOp $ TypeCheck.subCheck . typeCheckKernel
+  checkOp = typeCheckHostOp typeCheckSOAC
 
 instance TypeCheck.CheckableOp InKernel where
   checkOp = TypeCheck.subCheck . typeCheckKernelExp

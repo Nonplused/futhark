@@ -177,8 +177,10 @@ subCSE m = do
   CSEState _ cse_arrays <- ask
   return $ runReader m $ newCSEState cse_arrays
 
-instance CSEInOp op => CSEInOp (Kernel.HostOp lore op) where
-  cseInOp (Kernel.HostOp op) = Kernel.HostOp <$> cseInOp op
+instance (Attributes lore, Aliased lore,
+          CSEInOp (Op lore), CSEInOp op) => CSEInOp (Kernel.HostOp lore op) where
+  cseInOp (Kernel.SegOp op) = Kernel.SegOp <$> cseInOp op
+  cseInOp (Kernel.OtherOp op) = Kernel.OtherOp <$> cseInOp op
   cseInOp x = return x
 
 instance (Attributes lore, Aliased lore, CSEInOp (Op lore)) => CSEInOp (Kernel.Kernel lore) where
@@ -187,6 +189,11 @@ instance (Attributes lore, Aliased lore, CSEInOp (Op lore)) => CSEInOp (Kernel.K
             (Kernel.KernelMapper return cseInLambda
              (\b -> cseInBody (map (const Observe) $ bodyResult b) b)
              return return cseInKernelBody)
+
+instance (Attributes lore, Aliased lore, CSEInOp (Op lore)) => CSEInOp (Kernel.SegOp lore) where
+  cseInOp = subCSE .
+            Kernel.mapSegOpM
+            (Kernel.SegOpMapper return cseInLambda cseInKernelBody return)
 
 cseInKernelBody :: (Attributes lore, Aliased lore, CSEInOp (Op lore)) =>
                    Kernel.KernelBody lore -> CSEM lore (Kernel.KernelBody lore)

@@ -162,6 +162,7 @@ module Futhark.Pass.ExtractKernels
        (extractKernels)
        where
 
+import Control.Monad.Identity
 import Control.Monad.RWS.Strict
 import Control.Monad.Reader
 import Control.Monad.Writer.Strict
@@ -170,6 +171,7 @@ import qualified Data.Set as S
 import Data.Maybe
 import Data.List
 
+import Futhark.Analysis.Rephrase
 import Futhark.Representation.SOACS
 import qualified Futhark.Representation.SOACS.SOAC as SOAC
 import Futhark.Representation.SOACS.Simplify (simplifyStms, simpleSOACS)
@@ -178,7 +180,6 @@ import Futhark.Representation.Kernels.Kernel
 import Futhark.MonadFreshNames
 import Futhark.Tools
 import qualified Futhark.Transform.FirstOrderTransform as FOT
-import qualified Futhark.Pass.ExtractKernels.Kernelise as Kernelise
 import Futhark.Transform.Rename
 import Futhark.Pass
 import Futhark.Transform.CopyPropagate
@@ -191,8 +192,6 @@ import Futhark.Util
 import Futhark.Util.Log
 
 type KernelsStms = Out.Stms Out.Kernels
-type InKernelStms = Out.Stms Out.InKernel
-type InKernelLambda = Out.Lambda Out.InKernel
 
 -- | Transform a program using SOACs to a program using explicit
 -- kernels, using the kernel extraction transformation.
@@ -261,6 +260,12 @@ sequentialisedUnbalancedStm (Let pat _ (Op soac@(Screma _ form _)))
 sequentialisedUnbalancedStm _ =
   return Nothing
 
+soacsStmToKernels :: Stm -> Out.Stm Out.Kernels
+soacsStmToKernels = runIdentity . rephraseStm (injectSOACS OtherOp)
+
+soacsLambdaToKernels :: Lambda -> Out.Lambda Out.Kernels
+soacsLambdaToKernels = runIdentity . rephraseLambda (injectSOACS OtherOp)
+
 scopeForSOACs :: Scope Out.Kernels -> Scope SOACS
 scopeForSOACs = castScope
 
@@ -302,9 +307,9 @@ transformStm path (Let res_pat (StmAux cs _) (Op (Screma w form arrs)))
       transformStms path =<< (stmsToList . snd <$> runBinderT (certifying cs do_iswim) types)
 
   | Just (scan_lam, nes, map_lam) <- isScanomapSOAC form = do
-      scan_lam_sequential <- Kernelise.transformLambda scan_lam
-      map_lam_sequential <- Kernelise.transformLambda map_lam
-      segScan res_pat w w scan_lam_sequential map_lam_sequential nes arrs [] []
+      let scan_lam' = soacsLambdaToKernels scan_lam
+          map_lam' = soacsLambdaToKernels map_lam
+      segScan res_pat w scan_lam' map_lam' nes arrs [] []
 
 transformStm path (Let res_pat (StmAux cs _) (Op (Screma w form arrs)))
   | Just (comm, red_fun, nes) <- isReduceSOAC form,
@@ -319,11 +324,11 @@ transformStm path (Let pat (StmAux cs _) (Op (Screma w form arrs)))
   | Just (comm, red_lam, nes, map_lam) <- isRedomapSOAC form = do
 
   let paralleliseOuter = runBinder_ $ do
-        red_lam_sequential <- Kernelise.transformLambda red_lam
-        map_lam_sequential <- Kernelise.transformLambda map_lam
+        let red_lam' = soacsLambdaToKernels red_lam
+            map_lam' = soacsLambdaToKernels map_lam
         addStms =<<
           (fmap (certify cs) <$>
-           nonSegRed pat w comm' red_lam_sequential map_lam_sequential nes arrs)
+           nonSegRed pat w comm' red_lam' map_lam' nes arrs)
 
       outerParallelBody =
         renameBody =<<
@@ -378,7 +383,7 @@ transformStm path (Let pat aux@(StmAux cs _) (Op (Stream w (Parallel o comm red_
       | any (not . primType) $ lambdaReturnType red_fun = do
           -- Split into a chunked map and a reduction, with the latter
           -- further transformed.
-          fold_fun_sequential <- Kernelise.transformLambda fold_fun
+          let fold_fun' = soacsLambdaToKernels fold_fun
 
           let (red_pat_elems, concat_pat_elems) =
                 splitAt (length nes) $ patternValueElements pat
@@ -386,7 +391,7 @@ transformStm path (Let pat aux@(StmAux cs _) (Op (Stream w (Parallel o comm red_
 
           ((num_threads, red_results), stms) <-
             streamMap (map (baseString . patElemName) red_pat_elems) concat_pat_elems w
-            Noncommutative fold_fun_sequential nes arrs
+            Noncommutative fold_fun' nes arrs
 
           reduce_soac <- reduceSOAC comm' red_fun nes
 
@@ -396,8 +401,8 @@ transformStm path (Let pat aux@(StmAux cs _) (Op (Stream w (Parallel o comm red_
              Op (Screma num_threads reduce_soac red_results))
 
       | otherwise = do
-          red_fun_sequential <- Kernelise.transformLambda red_fun
-          fold_fun_sequential <- Kernelise.transformLambda fold_fun
+          let red_fun_sequential = soacsLambdaToKernels red_fun
+              fold_fun_sequential = soacsLambdaToKernels fold_fun
           fmap (certify cs) <$>
             streamRed pat w comm' red_fun_sequential fold_fun_sequential nes arrs
 
@@ -430,7 +435,7 @@ transformStm path (Let pat _ (Op (Stream w (Sequential nes) fold_fun arrs))) = d
   types <- asksScope scopeForSOACs
   transformStms path =<<
     (stmsToList . snd <$> runBinderT (sequentialStreamWholeArray pat w nes fold_fun arrs) types)
-
+{-
 transformStm _ (Let pat (StmAux cs _) (Op (Scatter w lam ivs as))) = runBinder_ $ do
   lam' <- Kernelise.transformLambda lam
   write_i <- newVName "write_i"
@@ -447,9 +452,9 @@ transformStm _ (Let pat (StmAux cs _) (Op (Scatter w lam ivs as))) = runBinder_ 
   certifying cs $ do
     addStms bnds
     letBind_ pat $ Op $ HostOp kernel
-
+-}
 transformStm _ (Let orig_pat (StmAux cs _) (Op (GenReduce w ops bucket_fun imgs))) = do
-  bfun' <- Kernelise.transformLambda bucket_fun
+  bfun' <- FOT.transformLambda bucket_fun
   genReduceKernel orig_pat [] [] cs w ops bfun' imgs
 
 transformStm _ bnd =
@@ -490,7 +495,7 @@ distributeMap path (MapLoop pat cs w lam arrs) = do
 
     let exploitOuterParallelism path' = do
           soactypes <- asksScope scopeForSOACs
-          (seq_lam, _) <- runBinderT (Kernelise.transformLambda lam) soactypes
+          (seq_lam, _) <- runBinderT (FOT.transformLambda lam) soactypes
           (acc', postkernels) <- runKernelM (env path') $ distribute $
             addStmsToKernel (bodyStms $ lambdaBody seq_lam) acc
           -- As above, we deal with identity mappings.
@@ -579,7 +584,7 @@ data KernelEnv = KernelEnv { kernelNest :: Nestings
                            }
 
 data KernelAcc = KernelAcc { kernelTargets :: Targets
-                           , kernelStms :: InKernelStms
+                           , kernelStms :: KernelsStms
                            }
 
 data KernelRes = KernelRes { accPostKernels :: PostKernels
@@ -609,15 +614,14 @@ postKernelsStms (PostKernels kernels) = mconcat $ map unPostKernel kernels
 typeEnvFromKernelAcc :: KernelAcc -> Scope Out.Kernels
 typeEnvFromKernelAcc = scopeOfPattern . fst . outerTarget . kernelTargets
 
-addStmsToKernel :: InKernelStms -> KernelAcc -> KernelAcc
+addStmsToKernel :: KernelsStms -> KernelAcc -> KernelAcc
 addStmsToKernel stms acc =
   acc { kernelStms = stms <> kernelStms acc }
 
-addStmToKernel :: (LocalScope Out.Kernels m, MonadFreshNames m) =>
-                  Stm -> KernelAcc -> m KernelAcc
-addStmToKernel bnd acc = do
-  stms <- runBinder_ $ Kernelise.transformStm bnd
-  return acc { kernelStms = stms <> kernelStms acc }
+addStmToKernel :: Monad m => Stm -> KernelAcc -> m KernelAcc
+addStmToKernel stm acc = do
+  let stm' = soacsStmToKernels stm
+  return acc { kernelStms = oneStm stm' <> kernelStms acc }
 
 newtype KernelM a = KernelM (ReaderT KernelEnv (WriterT KernelRes DistribM) a)
   deriving (Functor, Applicative, Monad,
@@ -833,13 +837,9 @@ distributeInnerMap maploop@(MapLoop pat cs w lam arrs) acc
       -- sequentialising.  This is only OK as long as further
       -- versioning does not take place down that branch (it currently
       -- does not).
-      (nestw_bnds, nestw, sequentialised_kernel) <- localScope extra_scope $ do
-        sequentialised_map_body <-
-          localScope (scopeOfLParams (lambdaParams lam)) $ runBinder_ $
-          Kernelise.transformStms lam_bnds
-        let kbody = KernelBody () sequentialised_map_body $
-                    map ThreadsReturn lam_res'
-        constructKernel nest' kbody
+      ((nestw, sequentialised_kernel), nestw_bnds) <- localScope extra_scope $ do
+        sequentialised_lam <- FOT.transformLambda lam
+        constructKernel nest' $ lambdaBody sequentialised_lam
 
       let outer_pat = loopNestingPattern $ fst nest
       path <- asks kernelPath
@@ -861,13 +861,18 @@ leavingNesting (MapLoop _ cs w lam arrs) acc =
      let acc' = acc { kernelTargets = newtargets }
      if null $ kernelStms acc'
        then return acc'
-       else do let kbody = Body () (kernelStms acc') res
-                   used_in_body = freeInBody kbody
+       else do let body = Body () (kernelStms acc') res
+                   used_in_body = freeInBody body
                    (used_params, used_arrs) =
                      unzip $
                      filter ((`S.member` used_in_body) . paramName . fst) $
                      zip (lambdaParams lam) arrs
-               stms <- runBinder_ $ Kernelise.mapIsh pat cs w used_params kbody used_arrs
+                   lam' = Lambda { lambdaParams = used_params
+                                 , lambdaBody = body
+                                 , lambdaReturnType = map rowType $ patternTypes pat
+                                 }
+               let stms = oneStm $ Let pat (StmAux cs ()) $ Op $
+                          OtherOp $ Screma w (mapSOAC lam') used_arrs
                return $ addStmsToKernel stms acc' { kernelStms = mempty }
 
 distributeMapBodyStms :: KernelAcc -> Stms SOACS -> KernelM KernelAcc
@@ -960,7 +965,7 @@ maybeDistributeStm bnd@(Let pat (StmAux cs _) (Op (Scatter w lam ivs as))) acc =
       | Just (perm, pat_unused) <- permutationAndMissing pat res ->
         localScope (typeEnvFromKernelAcc acc') $ do
           nest' <- expandKernelNest pat_unused nest
-          lam' <- Kernelise.transformLambda lam
+          let lam' = soacsLambdaToKernels lam
           addKernels kernels
           addKernel =<< segmentedScatterKernel nest' perm pat cs w lam' ivs as
           return acc'
@@ -973,7 +978,7 @@ maybeDistributeStm bnd@(Let pat (StmAux cs _) (Op (GenReduce w ops lam as))) acc
     Just (kernels, res, nest, acc')
       | Just (perm, pat_unused) <- permutationAndMissing pat res ->
         localScope (typeEnvFromKernelAcc acc') $ do
-          lam' <- Kernelise.transformLambda lam
+          lam' <- FOT.transformLambda lam
           nest' <- expandKernelNest pat_unused nest
           addKernels kernels
           addKernel =<< segmentedGenReduceKernel nest' perm cs w ops lam' as
@@ -995,8 +1000,8 @@ maybeDistributeStm bnd@(Let pat (StmAux cs _) (Op (Screma w form arrs))) acc
           -- it to the kernel nest.
           localScope (typeEnvFromKernelAcc acc') $ do
           nest' <- expandKernelNest pat_unused nest
-          map_lam' <- Kernelise.transformLambda map_lam
-          lam' <- Kernelise.transformLambda lam
+          let map_lam' = soacsLambdaToKernels map_lam
+              lam' = soacsLambdaToKernels lam
           localScope (typeEnvFromKernelAcc acc') $
             segmentedScanomapKernel nest' perm w lam' map_lam' nes arrs >>=
             kernelOrNot cs bnd acc kernels acc'
@@ -1018,8 +1023,8 @@ maybeDistributeStm bnd@(Let pat (StmAux cs _) (Op (Screma w form arrs))) acc
           -- it to the kernel nest.
           localScope (typeEnvFromKernelAcc acc') $ do
           nest' <- expandKernelNest pat_unused nest
-          lam' <- Kernelise.transformLambda lam
-          map_lam' <- Kernelise.transformLambda map_lam
+          lam' <- FOT.transformLambda lam
+          map_lam' <- FOT.transformLambda map_lam
 
           let comm' | commutativeLambda lam = Commutative
                     | otherwise             = comm
@@ -1122,7 +1127,7 @@ maybeDistributeStm stm@(Let _ aux (BasicOp (Concat d x xs w))) acc =
 
   where segmentedConcat nest =
           isSegmentedOp nest [0] w mempty mempty [] (x:xs) $
-          \pat _ _ _ _ (x':xs') _ ->
+          \pat _ _ _ (x':xs') _ ->
             let d' = d + length (snd nest) + 1
             in addStm $ Let pat aux $ BasicOp $ Concat d' x' xs' w
 
@@ -1192,7 +1197,7 @@ distributeIfPossible acc = do
                               }
 
 distributeSingleStm :: KernelAcc -> Stm
-                        -> KernelM (Maybe (PostKernels, Result, KernelNest, KernelAcc))
+                    -> KernelM (Maybe (PostKernels, Result, KernelNest, KernelAcc))
 distributeSingleStm acc bnd = do
   nest <- asks kernelNest
   tryDistribute nest (kernelTargets acc) (kernelStms acc) >>= \case
@@ -1213,7 +1218,7 @@ segmentedScatterKernel :: KernelNest
                        -> Pattern
                        -> Certificates
                        -> SubExp
-                       -> InKernelLambda
+                       -> Out.Lambda Out.Kernels
                        -> [VName] -> [(SubExp,Int,VName)]
                        -> KernelM KernelsStms
 segmentedScatterKernel nest perm scatter_pat cs scatter_w lam ivs dests = do
@@ -1245,15 +1250,13 @@ segmentedScatterKernel nest perm scatter_pat cs scatter_w lam ivs dests = do
                  map (inPlaceReturn ispace) $
                  zip3 as_ws as_inps $ chunks as_ns $ zip is vs
 
-    (k_bnds, k) <-
-      mapKernel w (FlatThreadSpace ispace) kernel_inps rts k_body
-
+    (k, k_bnds) <- mapKernel w ispace kernel_inps rts k_body
     addStms k_bnds
 
     let pat = Pattern [] $ rearrangeShape perm $
               patternValueElements $ loopNestingPattern $ fst nest
 
-    certifying cs $ letBind_ pat $ Op $ HostOp k
+    certifying cs $ letBind_ pat $ Op $ SegOp k
   where findInput kernel_inps a =
           maybe bad return $ find ((==a) . kernelInputName) kernel_inps
         bad = fail "Ill-typed nested scatter encountered."
@@ -1268,7 +1271,7 @@ segmentedGenReduceKernel :: KernelNest
                          -> Certificates
                          -> SubExp
                          -> [SOAC.GenReduceOp SOACS]
-                         -> InKernelLambda
+                         -> Out.Lambda Out.Kernels
                          -> [VName]
                          -> KernelM KernelsStms
 segmentedGenReduceKernel nest perm cs genred_w ops lam arrs = do
@@ -1296,7 +1299,7 @@ segmentedGenReduceKernel nest perm cs genred_w ops lam arrs = do
 
 genReduceKernel :: Pattern -> [(VName, SubExp)] -> [KernelInput]
                 -> Certificates -> SubExp -> [SOAC.GenReduceOp SOACS]
-                -> InKernelLambda -> [VName]
+                -> Out.Lambda Out.Kernels -> [VName]
                 -> DistribM KernelsStms
 genReduceKernel orig_pat ispace inputs cs genred_w ops lam arrs = runBinder_ $ do
   ops' <- forM ops $ \(SOAC.GenReduceOp num_bins dests nes op) ->
@@ -1310,9 +1313,11 @@ genReduceKernel orig_pat ispace inputs cs genred_w ops lam arrs = runBinder_ $ d
           letSubExp "genred_ne" $
             BasicOp $ Index ne_v $ fullSlice ne_v_t $
             replicate (shapeRank shape) $ DimFix $ intConst Int32 0
-        Out.GenReduceOp num_bins dests nes' shape <$> Kernelise.transformLambda op'
+        return $ Out.GenReduceOp num_bins dests nes' shape $
+          soacsLambdaToKernels op'
       Nothing ->
-        Out.GenReduceOp num_bins dests nes mempty <$> Kernelise.transformLambda op
+        return $ Out.GenReduceOp num_bins dests nes mempty $
+        soacsLambdaToKernels op
 
   let isDest = flip elem $ concatMap Out.genReduceDest ops'
       inputs' = filter (not . isDest . kernelInputArray) inputs
@@ -1334,23 +1339,26 @@ isVectorMap lam
 segmentedScanomapKernel :: KernelNest
                         -> [Int]
                         -> SubExp
-                        -> InKernelLambda -> InKernelLambda
+                        -> Out.Lambda Out.Kernels -> Out.Lambda Out.Kernels
                         -> [SubExp] -> [VName]
                         -> KernelM (Maybe KernelsStms)
 segmentedScanomapKernel nest perm segment_size lam map_lam nes arrs =
   isSegmentedOp nest perm segment_size (freeInLambda lam) (freeInLambda map_lam) nes arrs $
-  \pat total_num_elements ispace inps nes' _ _ ->
-    addStms =<< segScan pat total_num_elements segment_size lam map_lam nes' arrs ispace inps
+  \pat ispace inps nes' _ _ ->
+    addStms =<< traverse renameStm =<<
+    segScan pat segment_size lam map_lam nes' arrs ispace inps
 
 regularSegmentedRedomapKernel :: KernelNest
                               -> [Int]
                               -> SubExp -> Commutativity
-                              -> InKernelLambda -> InKernelLambda -> [SubExp] -> [VName]
+                              -> Out.Lambda Out.Kernels -> Out.Lambda Out.Kernels
+                              -> [SubExp] -> [VName]
                               -> KernelM (Maybe KernelsStms)
 regularSegmentedRedomapKernel nest perm segment_size comm lam map_lam nes arrs =
   isSegmentedOp nest perm segment_size (freeInLambda lam) (freeInLambda map_lam) nes arrs $
-    \pat total_num_elements ispace inps nes' _ _ ->
-      addStms =<< segRed pat total_num_elements segment_size comm lam map_lam nes' arrs ispace inps
+  \pat ispace inps nes' _ _ ->
+    addStms =<< traverse renameStm =<<
+    segRed pat segment_size comm lam map_lam nes' arrs ispace inps
 
 isSegmentedOp :: KernelNest
               -> [Int]
@@ -1358,7 +1366,6 @@ isSegmentedOp :: KernelNest
               -> Names -> Names
               -> [SubExp] -> [VName]
               -> (Pattern
-                  -> SubExp
                   -> [(VName, SubExp)]
                   -> [KernelInput]
                   -> [SubExp] -> [VName]  -> [VName]
@@ -1430,7 +1437,7 @@ isSegmentedOp nest perm segment_size free_in_op _free_in_fold_op nes arrs m = ru
     let pat = Pattern [] $ rearrangeShape perm $
               patternValueElements $ loopNestingPattern $ fst nest
 
-    m pat total_num_elements ispace kernel_inps nes' nested_arrs arrs'
+    m pat ispace kernel_inps nes' nested_arrs arrs'
 
   where replicateMissing ispace inp = do
           t <- lookupType $ kernelInputArray inp
