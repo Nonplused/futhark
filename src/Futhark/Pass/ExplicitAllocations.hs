@@ -529,40 +529,6 @@ handleHostOp (CmpSizeLe key size_class x) =
   return $ Inner $ CmpSizeLe key size_class x
 handleHostOp (OtherOp op) =
   fail $ "Cannot allocate memory in SOAC: " ++ pretty op
-{-
-handleHostOp (HostOp (Kernel desc space kernel_ts kbody)) =
-  subInKernel space $
-  Inner . HostOp . Kernel desc space kernel_ts <$>
-  localScope (scopeOfKernelSpace space) (allocInKernelBody kbody)
-
-handleHostOp (HostOp (SegMap space ts body)) = do
-  body' <- subInKernel space $
-           localScope (scopeOfKernelSpace space) $ allocInKernelBody body
-  return $ Inner $ HostOp $ SegMap space ts body'
-
-handleHostOp (HostOp (SegRed space comm red_op nes ts body)) = do
-  body' <- subInKernel space $
-           localScope (scopeOfKernelSpace space) $ allocInKernelBody body
-  red_op' <- allocInSegRedLambda space red_op
-  return $ Inner $ HostOp $ SegRed space comm red_op' nes ts body'
-
-handleHostOp (HostOp (SegScan space scan_op nes ts body)) = do
-  body' <- subInKernel space $
-           localScope (scopeOfKernelSpace space) $ allocInKernelBody body
-  scan_op' <- allocInSegRedLambda space scan_op
-  return $ Inner $ HostOp $ SegScan space scan_op' nes ts body'
-
-handleHostOp (HostOp (SegGenRed space ops ts body)) = do
-  body' <- subInKernel space $
-           localScope (scopeOfKernelSpace space) $ allocInKernelBody body
-  ops' <- forM ops $ \op -> do
-    lam <- allocInSegRedLambda space $ genReduceOp op
-    return op { genReduceOp = lam }
-  return $ Inner $ HostOp $ SegGenRed space ops' ts body'
-
-           localScope (scopeOfKernelSpace space) $ allocInBodyNoDirect body
-  return $ Inner $ SegOp $ SegGenRed space ops' ts body'
--}
 
 handleHostOp (SegOp op) =
   Inner . SegOp <$> handleSegOp op
@@ -820,40 +786,6 @@ instance SizeSubst (KernelExp lore) where
 sizeSubst :: SizeSubst (Op lore) => Stm lore -> ChunkMap
 sizeSubst (Let pat _ (Op op)) = opSizeSubst pat op
 sizeSubst _ = mempty
-{-
-allocInGroupStreamLambda :: SubExp
-                         -> GroupStreamLambda InInKernel
-                         -> [MemBound NoUniqueness]
-                         -> [(VName, IxFun)]
-                         -> AllocM InInKernel OutInKernel (GroupStreamLambda OutInKernel)
-allocInGroupStreamLambda maxchunk lam acc_summaries arr_summaries = do
-  let GroupStreamLambda block_size block_offset acc_params arr_params body = lam
-
-  acc_params' <-
-    allocInAccParameters acc_params acc_summaries
-  arr_params' <-
-    allocInChunkedParameters (LeafExp block_offset int32) $
-    zip arr_params arr_summaries
-
-  body' <- localScope (M.insert block_size (IndexInfo Int32) $
-                       M.insert block_offset (IndexInfo Int32) $
-                       scopeOfLParams $ acc_params' ++ arr_params')  $
-           local (boundDim block_size maxchunk) $ do
-           body' <- allocInBodyNoDirect body
-           insertStmsM $ do
-             -- We copy the result of the body to whereever the accumulators are stored.
-             addStms (bodyStms body')
-             let maybeCopyResult r p =
-                   case paramAttr p of
-                     MemArray _ _ _ (ArrayIn mem ixfun) ->
-                       ensureArrayIn (paramType p) mem ixfun r
-                     _ ->
-                       return r
-             resultBodyM =<<
-               zipWithM maybeCopyResult (bodyResult body') acc_params'
-  return $
-    GroupStreamLambda block_size block_offset acc_params' arr_params' body'
--}
 
 mkLetNamesB' :: (Op (Lore m) ~ MemOp inner,
                  MonadBinder m, ExpAttr (Lore m) ~ (),

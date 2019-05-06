@@ -992,13 +992,14 @@ sKernelThread, sKernelGroup :: String
 (sKernelThread, sKernelGroup) = (sKernel' threadOperations, sKernel' groupOperations)
   where sKernel' ops name num_groups group_size v f = do
           (constants, set_constants) <- kernelInitialisationSimple num_groups group_size
-          sKernel (ops constants) constants name $ do
+          let name' = nameFromString $ name ++ "_" ++ show (baseTag v)
+          sKernel (ops constants) constants name' $ do
             set_constants
             dPrimV_ v $ kernelGlobalThreadId constants
             f constants
 
 sKernel :: Operations ExplicitMemory Imp.KernelOp
-        -> KernelConstants -> String -> ImpM ExplicitMemory Imp.KernelOp a -> CallKernelGen ()
+        -> KernelConstants -> Name -> ImpM ExplicitMemory Imp.KernelOp a -> CallKernelGen ()
 sKernel ops constants name m = do
   body <- makeAllMemoryGlobal $ subImpM_ ops m
   uses <- computeKernelUses body mempty
@@ -1007,10 +1008,8 @@ sKernel ops constants name m = do
     , Imp.kernelUses = uses
     , Imp.kernelNumGroups = [kernelNumGroups constants]
     , Imp.kernelGroupSize = [kernelGroupSize constants]
-    , Imp.kernelName =
-        nameFromString $ name ++ "_" ++ show tag
+    , Imp.kernelName = name
     }
-  where tag = baseTag $ kernelGlobalThreadIdVar constants
 
 -- | A kernel with the given number of threads, running per-thread code.
 sKernelSimple :: String -> Imp.Exp
@@ -1018,7 +1017,8 @@ sKernelSimple :: String -> Imp.Exp
               -> CallKernelGen ()
 sKernelSimple name kernel_size f = do
   (constants, init_constants) <- simpleKernelConstants kernel_size name
-  sKernel (threadOperations constants) constants name $ do
+  let name' = nameFromString $ name ++ show (baseTag $ kernelGlobalThreadIdVar constants)
+  sKernel (threadOperations constants) constants name' $ do
     init_constants
     f constants
 
@@ -1063,8 +1063,10 @@ sReplicate arr (Shape ds) se = do
     simpleKernelConstants (product dims) "replicate"
 
   let is' = unflattenIndex dims $ kernelGlobalThreadId constants
+      name = nameFromString $ "replicate_" ++
+             show (baseTag $ kernelGlobalThreadIdVar constants)
 
-  sKernel (threadOperations constants) constants "replicate" $ do
+  sKernel (threadOperations constants) constants name $ do
     set_constants
     sWhen (kernelThreadActive constants) $
       copyDWIM arr is' se $ drop (length ds) is'
@@ -1076,7 +1078,10 @@ sIota arr n x s et = do
   destloc <- entryArrayLocation <$> lookupArray arr
   (constants, set_constants) <- simpleKernelConstants n "iota"
 
-  sKernel (threadOperations constants) constants "iota" $ do
+  let name = nameFromString $ "iota_" ++
+             show (baseTag $ kernelGlobalThreadIdVar constants)
+
+  sKernel (threadOperations constants) constants name $ do
     set_constants
     let gtid = kernelGlobalThreadId constants
     sWhen (kernelThreadActive constants) $ do
@@ -1104,7 +1109,10 @@ sCopy bt
 
   (constants, set_constants) <- simpleKernelConstants kernel_size "copy"
 
-  sKernel (threadOperations constants) constants "copy" $ do
+  let name = nameFromString $ "copy_" ++
+             show (baseTag $ kernelGlobalThreadIdVar constants)
+
+  sKernel (threadOperations constants) constants name $ do
     set_constants
 
     let gtid = kernelGlobalThreadId constants

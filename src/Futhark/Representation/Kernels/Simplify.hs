@@ -15,7 +15,6 @@ module Futhark.Representation.Kernels.Simplify
 where
 
 import Control.Monad
-import Data.Either
 import Data.Foldable
 import Data.List
 import Data.Maybe
@@ -332,39 +331,6 @@ kernelRules = standardRules <>
                        [RuleOp distributeKernelResults,
                         RuleBasicOp removeUnnecessaryCopy]
 
-fuseStreamIota :: TopDownRuleOp (Wise InKernel)
-fuseStreamIota vtable pat _ (GroupStream w max_chunk lam accs arrs)
-  | ([(iota_cs, iota_param, iota_start, iota_stride, iota_t)], params_and_arrs) <-
-      partitionEithers $ zipWith (isIota vtable) (groupStreamArrParams lam) arrs = do
-
-      let (arr_params', arrs') = unzip params_and_arrs
-          chunk_size = groupStreamChunkSize lam
-          offset = groupStreamChunkOffset lam
-
-      body' <- insertStmsM $ inScopeOf lam $ certifying iota_cs $ do
-        -- Convert index to appropriate type.
-        offset' <- asIntS iota_t $ Var offset
-        offset'' <- letSubExp "offset_by_stride" $
-          BasicOp $ BinOp (Mul iota_t) offset' iota_stride
-        start <- letSubExp "iota_start" $
-            BasicOp $ BinOp (Add iota_t) offset'' iota_start
-        letBindNames_ [paramName iota_param] $
-          BasicOp $ Iota (Var chunk_size) start iota_stride iota_t
-        return $ groupStreamLambdaBody lam
-      let lam' = lam { groupStreamArrParams = arr_params',
-                       groupStreamLambdaBody = body'
-                     }
-      letBind_ pat $ Op $ GroupStream w max_chunk lam' accs arrs'
-fuseStreamIota _ _ _ _ = cannotSimplify
-
-isIota :: ST.SymbolTable lore -> a -> VName
-       -> Either (Certificates, a, SubExp, SubExp, IntType) (a, VName)
-isIota vtable chunk arr
-  | Just (BasicOp (Iota _ x s it), cs) <- ST.lookupExp arr vtable =
-      Left (cs, chunk, x, s, it)
-  | otherwise =
-      Right (chunk, arr)
-
 -- If a kernel produces something invariant to the kernel, turn it
 -- into a replicate.
 removeInvariantKernelResults :: TopDownRuleOp (Wise Kernels)
@@ -446,45 +412,3 @@ distributeKernelResults (vtable, used)
         _ -> Nothing
       where matches (_, _, kre) = kre == ThreadsReturn (Var $ patElemName pe)
 distributeKernelResults _ _ _ _ = cannotSimplify
-
-simplifyKnownIterationStream :: TopDownRuleOp (Wise InKernel)
--- Remove GroupStreams over single-element arrays.  Not much to stream
--- here, and no information to exploit.
-simplifyKnownIterationStream _ pat _ (GroupStream (Constant v) _ lam accs arrs)
-  | oneIsh v = do
-      let GroupStreamLambda chunk_size chunk_offset acc_params arr_params body = lam
-
-      letBindNames_ [chunk_size] $ BasicOp $ SubExp $ constant (1::Int32)
-
-      letBindNames_ [chunk_offset] $ BasicOp $ SubExp $ constant (0::Int32)
-
-      forM_ (zip acc_params accs) $ \(p,a) ->
-        letBindNames_ [paramName p] $ BasicOp $ SubExp a
-
-      forM_ (zip arr_params arrs) $ \(p,a) ->
-        letBindNames_ [paramName p] $ BasicOp $ Index a $
-        fullSlice (paramType p)
-        [DimSlice (Var chunk_offset) (Var chunk_size) (constant (1::Int32))]
-
-      res <- bodyBind body
-      forM_ (zip (patternElements pat) res) $ \(pe,r) ->
-        letBindNames_ [patElemName pe] $ BasicOp $ SubExp r
-simplifyKnownIterationStream _ _ _ _ = cannotSimplify
-
-removeUnusedStreamInputs :: TopDownRuleOp (Wise InKernel)
-removeUnusedStreamInputs _ pat _ (GroupStream w maxchunk lam accs arrs)
-  | (used,unused) <- partition (isUsed . paramName . fst) $ zip arr_params arrs,
-    not $ null unused = do
-      let (arr_params', arrs') = unzip used
-          lam' = GroupStreamLambda chunk_size chunk_offset acc_params arr_params' body
-      letBind_ pat $ Op $ GroupStream w maxchunk lam' accs arrs'
-  where GroupStreamLambda chunk_size chunk_offset acc_params arr_params body = lam
-
-        isUsed = (`S.member` freeInBody body)
-removeUnusedStreamInputs _ _ _ _ = cannotSimplify
-
-inKernelRules :: RuleBook (Wise InKernel)
-inKernelRules = standardRules <>
-                ruleBook [RuleOp fuseStreamIota,
-                          RuleOp simplifyKnownIterationStream,
-                          RuleOp removeUnusedStreamInputs] []
