@@ -1008,8 +1008,9 @@ sKernel ops constants name m = do
     , Imp.kernelNumGroups = [kernelNumGroups constants]
     , Imp.kernelGroupSize = [kernelGroupSize constants]
     , Imp.kernelName =
-        nameFromString $ name ++ "_" ++ show (baseTag $ kernelGlobalThreadIdVar constants)
+        nameFromString $ name ++ "_" ++ show tag
     }
+  where tag = baseTag $ kernelGlobalThreadIdVar constants
 
 -- | A kernel with the given number of threads, running per-thread code.
 sKernelSimple :: String -> Imp.Exp
