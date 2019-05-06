@@ -435,9 +435,9 @@ transformStm path (Let pat _ (Op (Stream w (Sequential nes) fold_fun arrs))) = d
   types <- asksScope scopeForSOACs
   transformStms path =<<
     (stmsToList . snd <$> runBinderT (sequentialStreamWholeArray pat w nes fold_fun arrs) types)
-{-
+
 transformStm _ (Let pat (StmAux cs _) (Op (Scatter w lam ivs as))) = runBinder_ $ do
-  lam' <- Kernelise.transformLambda lam
+  let lam' = soacsLambdaToKernels lam
   write_i <- newVName "write_i"
   let (as_ws, as_ns, as_vs) = unzip3 as
       (i_res, v_res) = splitAt (sum as_ns) $ bodyResult $ lambdaBody lam'
@@ -447,12 +447,12 @@ transformStm _ (Let pat (StmAux cs _) (Op (Scatter w lam ivs as))) = runBinder_ 
       body = KernelBody () kstms krets
       inputs = do (p, p_a) <- zip (lambdaParams lam') ivs
                   return $ KernelInput (paramName p) (paramType p) p_a [Var write_i]
-  (bnds, kernel) <-
-    mapKernel w (FlatThreadSpace [(write_i,w)]) inputs (map rowType $ patternTypes pat) body
+  (kernel, stms) <-
+    mapKernel w [(write_i,w)] inputs (map rowType $ patternTypes pat) body
   certifying cs $ do
-    addStms bnds
-    letBind_ pat $ Op $ HostOp kernel
--}
+    addStms stms
+    letBind_ pat $ Op $ SegOp kernel
+
 transformStm _ (Let orig_pat (StmAux cs _) (Op (GenReduce w ops bucket_fun imgs))) = do
   bfun' <- FOT.transformLambda bucket_fun
   genReduceKernel orig_pat [] [] cs w ops bfun' imgs
