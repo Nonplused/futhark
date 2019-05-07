@@ -59,7 +59,7 @@ optimiseStm stmt@(Let pat aux (Op (HostOp old_kernel@(Kernel desc space ts body)
 optimiseStm (Let pat aux e) =
   pure <$> (Let pat aux <$> mapExpM optimise e)
   where optimise = identityMapper { mapOnBody = const optimiseBody }
-
+{-
 tileInKernelBody :: Names -> VarianceTable
                  -> KernelSpace -> KernelBody InKernel
                  -> TileM (Stms Kernels, KernelSpace, KernelBody InKernel)
@@ -389,3 +389,4 @@ sufficientGroups gspace group_size = do
   num_threads <- letSubExp "num_threads" $
                  BasicOp $ BinOp (Mul Int32) num_groups group_size
   return (num_threads, num_groups)
+-}

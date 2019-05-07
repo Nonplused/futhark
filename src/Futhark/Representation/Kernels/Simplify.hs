@@ -10,7 +10,6 @@ module Futhark.Representation.Kernels.Simplify
 
        -- * Building blocks
        , simplifyKernelOp
-       , simplifyKernelExp
        )
 where
 
@@ -176,131 +175,9 @@ instance Engine.Simplifiable SplitOrdering where
   simplify (SplitStrided stride) =
     SplitStrided <$> Engine.simplify stride
 
-instance Engine.Simplifiable CombineSpace where
-  simplify (CombineSpace scatter cspace) =
-    CombineSpace <$> mapM Engine.simplify scatter
-                 <*> mapM (traverse Engine.simplify) cspace
-
-simplifyKernelExp :: Engine.SimplifiableLore lore =>
-                     KernelSpace -> KernelExp lore
-                  -> Engine.SimpleM lore (KernelExp (Wise lore), Stms (Wise lore))
-
-simplifyKernelExp _ (Barrier se) =
-  (,) <$> (Barrier <$> Engine.simplify se) <*> pure mempty
-
-simplifyKernelExp kspace (Combine cspace ts active body) = do
-  ((body_stms', body_res'), hoisted) <-
-    wrapbody $ Engine.blockIf (Engine.hasFree bound_here `Engine.orIf`
-                               maybeBlockUnsafe) $
-    localScope (scopeOfCombineSpace cspace) $
-    Engine.simplifyBody (map (const Observe) ts) body
-  body' <- Engine.constructBody body_stms' body_res'
-  (,) <$> (Combine <$> Engine.simplify cspace
-           <*> mapM Engine.simplify ts
-           <*> mapM Engine.simplify active
-           <*> pure body') <*> pure hoisted
-  where bound_here = S.fromList $ M.keys $ scopeOfCombineSpace cspace
-
-        protectCombineHoisted checkIfActive m = do
-          (x, stms) <- m
-          runBinder $ do
-            if any (not . safeExp . stmExp) stms
-              then do is_active <- checkIfActive
-                      mapM_ (Engine.protectIf (not . safeExp) is_active) stms
-              else addStms stms
-            return x
-
-        (maybeBlockUnsafe, wrapbody)
-          | [d] <- map snd $ cspaceDims cspace,
-            d == spaceGroupSize kspace =
-            (Engine.isFalse True,
-             protectCombineHoisted $
-              letSubExp "active" =<<
-              foldBinOp LogAnd (constant True) =<<
-              mapM (uncurry check) active)
-          | otherwise =
-              (Engine.isNotSafe, id)
-
-        check v se =
-          letSubExp "is_active" $ BasicOp $ CmpOp (CmpSlt Int32) (Var v) se
-
-simplifyKernelExp _ (GroupReduce w lam input) = do
-  arrs' <- mapM Engine.simplify arrs
-  nes' <- mapM Engine.simplify nes
-  w' <- Engine.simplify w
-  (lam', hoisted) <- Engine.simplifyLambdaSeq lam (map (const Nothing) arrs')
-  return (GroupReduce w' lam' $ zip nes' arrs', hoisted)
-  where (nes,arrs) = unzip input
-
-simplifyKernelExp _ (GroupScan w lam input) = do
-  w' <- Engine.simplify w
-  nes' <- mapM Engine.simplify nes
-  arrs' <- mapM Engine.simplify arrs
-  (lam', hoisted) <- Engine.simplifyLambdaSeq lam (map (const Nothing) arrs')
-  return (GroupScan w' lam' $ zip nes' arrs', hoisted)
-  where (nes,arrs) = unzip input
-
-simplifyKernelExp _ (GroupGenReduce w dests op bucket vs locks) = do
-  w' <- Engine.simplify w
-  dests' <- mapM Engine.simplify dests
-  (op', hoisted) <- Engine.simplifyLambdaSeq op (map (const Nothing) vs)
-  bucket' <- Engine.simplify bucket
-  vs' <- mapM Engine.simplify vs
-  locks' <- Engine.simplify locks
-  return (GroupGenReduce w' dests' op' bucket' vs' locks', hoisted)
-
-simplifyKernelExp _ (GroupStream w maxchunk lam accs arrs) = do
-  w' <- Engine.simplify w
-  maxchunk' <- Engine.simplify maxchunk
-  accs' <- mapM Engine.simplify accs
-  arrs' <- mapM Engine.simplify arrs
-  (lam', hoisted) <- simplifyGroupStreamLambda lam w' maxchunk' arrs'
-  return (GroupStream w' maxchunk' lam' accs' arrs', hoisted)
-
-simplifyGroupStreamLambda :: Engine.SimplifiableLore lore =>
-                             GroupStreamLambda lore
-                          -> SubExp -> SubExp -> [VName]
-                          -> Engine.SimpleM lore (GroupStreamLambda (Wise lore), Stms (Wise lore))
-simplifyGroupStreamLambda lam w max_chunk arrs = do
-  let GroupStreamLambda block_size block_offset acc_params arr_params body = lam
-      bound_here = S.fromList $ block_size : block_offset :
-                   map paramName (acc_params ++ arr_params)
-  ((body_stms', body_res'), hoisted) <-
-    Engine.enterLoop $
-    Engine.bindLoopVar block_size Int32 max_chunk $
-    Engine.bindLoopVar block_offset Int32 w $
-    Engine.bindLParams acc_params $
-    Engine.bindChunkLParams block_offset (zip arr_params arrs) $
-    Engine.blockIf (Engine.hasFree bound_here `Engine.orIf` Engine.isConsumed) $
-    Engine.simplifyBody (replicate (length (bodyResult body)) Observe) body
-  acc_params' <- mapM (Engine.simplifyParam Engine.simplify) acc_params
-  arr_params' <- mapM (Engine.simplifyParam Engine.simplify) arr_params
-  body' <- Engine.constructBody body_stms' body_res'
-  return (GroupStreamLambda block_size block_offset acc_params' arr_params' body', hoisted)
-
 instance Engine.Simplifiable SegSpace where
   simplify (SegSpace phys dims) =
     SegSpace phys <$> mapM (traverse Engine.simplify) dims
-
-instance Engine.Simplifiable KernelSpace where
-  simplify (KernelSpace gtid ltid gid num_threads num_groups group_size structure) =
-    KernelSpace gtid ltid gid
-    <$> Engine.simplify num_threads
-    <*> Engine.simplify num_groups
-    <*> Engine.simplify group_size
-    <*> Engine.simplify structure
-
-instance Engine.Simplifiable SpaceStructure where
-  simplify (FlatThreadSpace dims) =
-    FlatThreadSpace <$> (zip gtids <$> mapM Engine.simplify gdims)
-    where (gtids, gdims) = unzip dims
-  simplify (NestedThreadSpace dims) =
-    NestedThreadSpace
-    <$> (zip4 gtids
-         <$> mapM Engine.simplify gdims
-         <*> pure ltids
-         <*> mapM Engine.simplify ldims)
-    where (gtids, gdims, ltids, ldims) = unzip4 dims
 
 instance Engine.Simplifiable KernelResult where
   simplify (ThreadsReturn what) =
@@ -316,11 +193,6 @@ instance Engine.Simplifiable KernelResult where
     <*> Engine.simplify what
 
 instance BinderOps (Wise Kernels) where
-  mkExpAttrB = bindableMkExpAttrB
-  mkBodyB = bindableMkBodyB
-  mkLetNamesB = bindableMkLetNamesB
-
-instance BinderOps (Wise InKernel) where
   mkExpAttrB = bindableMkExpAttrB
   mkBodyB = bindableMkBodyB
   mkLetNamesB = bindableMkLetNamesB

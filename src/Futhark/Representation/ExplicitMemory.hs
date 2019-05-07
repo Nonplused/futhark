@@ -56,7 +56,6 @@
 module Futhark.Representation.ExplicitMemory
        ( -- * The Lore definition
          ExplicitMemory
-       , InKernel
        , MemOp (..)
        , MemInfo (..)
        , MemBound
@@ -87,7 +86,6 @@ module Futhark.Representation.ExplicitMemory
        , module Futhark.Representation.AST.Pretty
        , module Futhark.Representation.AST.Syntax
        , module Futhark.Representation.Kernels.Kernel
-       , module Futhark.Representation.Kernels.KernelExp
        , module Futhark.Analysis.PrimExp.Convert
        )
 where
@@ -104,7 +102,6 @@ import Data.Monoid ((<>))
 import Futhark.Analysis.Metrics
 import Futhark.Representation.AST.Syntax
 import Futhark.Representation.Kernels.Kernel
-import Futhark.Representation.Kernels.KernelExp
 import Futhark.Representation.AST.Attributes
 import Futhark.Representation.AST.Attributes.Aliases
 import Futhark.Representation.AST.Traversals
@@ -127,7 +124,6 @@ import qualified Futhark.Analysis.SymbolTable as ST
 
 -- | A lore containing explicit memory information.
 data ExplicitMemory
-data InKernel
 
 type ExplicitMemorish lore = (SameScope lore ExplicitMemory,
                               RetType lore ~ FunReturns,
@@ -226,14 +222,6 @@ instance Annotations ExplicitMemory where
   type RetType    ExplicitMemory = FunReturns
   type BranchType ExplicitMemory = BodyReturns
   type Op         ExplicitMemory = MemOp (HostOp ExplicitMemory ())
-
-instance Annotations InKernel where
-  type LetAttr    InKernel = MemInfo SubExp NoUniqueness MemBind
-  type FParamAttr InKernel = MemInfo SubExp Uniqueness MemBind
-  type LParamAttr InKernel = MemInfo SubExp NoUniqueness MemBind
-  type RetType    InKernel = FunReturns
-  type BranchType InKernel = BodyReturns
-  type Op         InKernel = MemOp (KernelExp InKernel)
 
 -- | The index function representation used for memory annotations.
 type IxFun = IxFun.IxFun (PrimExp VName)
@@ -498,21 +486,7 @@ instance TC.CheckableOp ExplicitMemory where
   checkOp (Alloc size _) = TC.require [Prim int64] size
   checkOp (Inner op) = typeCheckHostOp (const $ return ()) op
 
-instance TC.CheckableOp InKernel where
-  checkOp (Alloc size _) = TC.require [Prim int64] size
-  checkOp (Inner k) = TC.subCheck $ typeCheckKernelExp k
-
 instance TC.Checkable ExplicitMemory where
-  checkFParamLore = checkMemInfo
-  checkLParamLore = checkMemInfo
-  checkLetBoundLore = checkMemInfo
-  checkRetType = mapM_ TC.checkExtType . retTypeValues
-  primFParam name t = return $ Param name (MemPrim t)
-  matchPattern = matchPatternToExp
-  matchReturnType = matchFunctionReturnType
-  matchBranchType = matchBranchReturnType
-
-instance TC.Checkable InKernel where
   checkFParamLore = checkMemInfo
   checkLParamLore = checkMemInfo
   checkLetBoundLore = checkMemInfo
@@ -785,9 +759,6 @@ checkMemInfo name (MemArray _ shape _ (ArrayIn v ixfun)) = do
 instance Attributes ExplicitMemory where
   expTypesFromPattern = return . map snd . snd . bodyReturnsFromPattern
 
-instance Attributes InKernel where
-  expTypesFromPattern = return . map snd . snd . bodyReturnsFromPattern
-
 bodyReturnsFromPattern :: PatternT (MemBound NoUniqueness)
                        -> ([(VName,BodyReturns)], [(VName,BodyReturns)])
 bodyReturnsFromPattern pat =
@@ -821,7 +792,6 @@ instance (PP.Pretty u, PP.Pretty r) => PrettyAnnot (ParamT (MemInfo SubExp u r))
   ppAnnot = bindeeAnnot paramName paramAttr
 
 instance PrettyLore ExplicitMemory where
-instance PrettyLore InKernel where
 
 bindeeAnnot :: (PP.Pretty u, PP.Pretty r) =>
                (a -> VName) -> (a -> MemInfo SubExp u r)
@@ -1007,41 +977,6 @@ instance OpReturns ExplicitMemory where
     return [MemMem space]
   opReturns (Inner (SegOp op)) = segOpReturns op
   opReturns k = extReturns <$> opType k
-
-instance OpReturns InKernel where
-  opReturns (Alloc _ space) =
-    return [MemMem space]
-
-  opReturns (Inner (GroupStream _ _ lam _ _)) =
-    forM (groupStreamAccParams lam) $ \param ->
-      case paramAttr param of
-        MemPrim bt ->
-          return $ MemPrim bt
-        MemArray et shape _ (ArrayIn mem ixfun) ->
-          return $ MemArray et (Shape $ map Free $ shapeDims shape) NoUniqueness $
-          Just $ ReturnsInBlock mem $ existentialiseIxFun [] ixfun
-        MemMem space ->
-          return $ MemMem space
-
-  opReturns (Inner (GroupScan _ _ input)) =
-    mapM varReturns arrs
-    where arrs = map snd input
-
-  opReturns (Inner (GroupGenReduce _ dests _ _ _ _)) =
-    mapM varReturns dests
-
-  opReturns (Inner (Barrier res)) = mapM f res
-    where f (Var v) = varReturns v
-          f (Constant v) = return $ MemPrim $ primValueType v
-
-  opReturns (Inner (Combine (CombineSpace scatter cspace) ts _ _)) =
-    (++) <$> mapM varReturns as <*>
-    pure (extReturns $ staticShapes $ map (`arrayOfShape` shape) $ drop (sum ns*2) ts)
-    where (_, ns, as) = unzip3 scatter
-          shape = Shape $ map snd cspace
-
-  opReturns k =
-    extReturns <$> opType k
 
 applyFunReturns :: Typed attr =>
                    [FunReturns]

@@ -15,7 +15,6 @@ module Futhark.Pass.ExtractKernels.BlockedKernel
 
        , injectSOACS
 
-       , newKernelSpace
        , getSize
        , segThread
        , mkSegSpace
@@ -414,18 +413,6 @@ readKernelInput inp = do
   return $ Let (Pattern [] [pe]) (defAux ()) $
     BasicOp $ Index (kernelInputArray inp) $
     fullSlice arr_t $ map DimFix $ kernelInputIndices inp
-
-newKernelSpace :: MonadFreshNames m =>
-                  (SubExp,SubExp,SubExp) -> SpaceStructure -> m KernelSpace
-newKernelSpace (num_groups, group_size, num_threads) ispace =
-  KernelSpace
-  <$> newVName "global_tid"
-  <*> newVName "local_tid"
-  <*> newVName "group_id"
-  <*> pure num_threads
-  <*> pure num_groups
-  <*> pure group_size
-  <*> pure ispace
 
 injectSOACS :: (Monad m,
                 SameScope from to,

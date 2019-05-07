@@ -34,9 +34,6 @@ import qualified Futhark.Optimise.Simplify.Engine as Engine
 import Futhark.Pass
 import Futhark.Util (splitFromEnd, takeLast)
 
-type InInKernel = Futhark.Representation.Kernels.InKernel
-type OutInKernel = Futhark.Representation.ExplicitMemory.InKernel
-
 data AllocStm = SizeComputation VName (PrimExp VName)
               | Allocation VName SubExp Space
               | ArrayCopy VName VName
@@ -167,7 +164,7 @@ instance (Allocable fromlore tolore, Allocator tolore (AllocM fromlore tolore)) 
   collectStms (AllocM m) = AllocM $ collectBinderStms m
   certifying cs (AllocM m) = AllocM $ certifyingBinder cs m
 
-instance Allocable fromlore OutInKernel =>
+instance Allocable fromlore ExplicitMemory =>
          Allocator ExplicitMemory (AllocM fromlore ExplicitMemory) where
   expHints e = do
     f <- asks envExpHints
@@ -194,11 +191,6 @@ newtype PatAllocM lore a = PatAllocM (RWS
                               MonadFreshNames)
 
 instance Allocator ExplicitMemory (PatAllocM ExplicitMemory) where
-  addAllocStm = tell . pure
-  dimAllocationSize = return
-  askDefaultSpace = return DefaultSpace
-
-instance Allocator OutInKernel (PatAllocM OutInKernel) where
   addAllocStm = tell . pure
   dimAllocationSize = return
   askDefaultSpace = return DefaultSpace
@@ -723,8 +715,8 @@ allocInBinOpLambda lvl (SegSpace flat _) lam = do
 
 allocInBinOpParams :: SubExp
                    -> PrimExp VName -> PrimExp VName
-                   -> [LParam InInKernel]
-                   -> [LParam InInKernel]
+                   -> [LParam Kernels]
+                   -> [LParam Kernels]
                    -> AllocM Kernels ExplicitMemory ([LParam ExplicitMemory], [LParam ExplicitMemory])
 allocInBinOpParams num_threads my_id other_id xs ys = unzip <$> zipWithM alloc xs ys
   where alloc x y =
@@ -773,14 +765,8 @@ instance SizeSubst (HostOp lore op) where
     M.singleton (patElemName size) elems_per_thread
   opSizeSubst _ _ = mempty
 
-instance SizeSubst (Kernel lore) where
-  opSizeSubst _ _ = mempty
-
 instance SizeSubst op => SizeSubst (MemOp op) where
   opSizeSubst pat (Inner op) = opSizeSubst pat op
-  opSizeSubst _ _ = mempty
-
-instance SizeSubst (KernelExp lore) where
   opSizeSubst _ _ = mempty
 
 sizeSubst :: SizeSubst (Op lore) => Stm lore -> ChunkMap
@@ -814,17 +800,7 @@ instance BinderOps ExplicitMemory where
   mkBodyB stms res = return $ Body () stms res
   mkLetNamesB = mkLetNamesB' ()
 
-instance BinderOps OutInKernel where
-  mkExpAttrB _ _ = return ()
-  mkBodyB stms res = return $ Body () stms res
-  mkLetNamesB = mkLetNamesB' ()
-
 instance BinderOps (Engine.Wise ExplicitMemory) where
-  mkExpAttrB pat e = return $ Engine.mkWiseExpAttr pat () e
-  mkBodyB stms res = return $ Engine.mkWiseBody () stms res
-  mkLetNamesB = mkLetNamesB''
-
-instance BinderOps (Engine.Wise OutInKernel) where
   mkExpAttrB pat e = return $ Engine.mkWiseExpAttr pat () e
   mkBodyB stms res = return $ Engine.mkWiseBody () stms res
   mkLetNamesB = mkLetNamesB''
