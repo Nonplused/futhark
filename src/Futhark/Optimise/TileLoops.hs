@@ -40,51 +40,45 @@ optimiseBody (Body () bnds res) = localScope (scopeOf bnds) $
   Body () <$> (mconcat <$> mapM optimiseStm (stmsToList bnds)) <*> pure res
 
 optimiseStm :: Stm Kernels -> TileM (Stms Kernels)
-{-
-optimiseStm stmt@(Let pat aux (Op (HostOp old_kernel@(Kernel desc space ts body)))) = do
-  res3dtiling <- doRegTiling3D stmt
+optimiseStm stm@(Let pat aux (Op (SegOp (SegMap lvl@SegThread{} space ts kbody)))) | False = do
+  res3dtiling <- doRegTiling3D stm
   case res3dtiling of
     Just (extra_bnds, stmt') -> return $ extra_bnds <> oneStm stmt'
     Nothing -> do
-          (extra_bnds, space', body') <- tileInKernelBody mempty initial_variance space body
-          let new_kernel = Kernel desc space' ts body'
-          -- XXX: we should not change the type of the kernel (such as by
-          -- changing the number of groups being used for a kernel that
-          -- returns a result-per-group).
-          if kernelType old_kernel == kernelType new_kernel
-            then return $ extra_bnds <> oneStm (Let pat aux $ Op $ HostOp new_kernel)
-            else return $ oneStm $ Let pat aux $ Op $ HostOp old_kernel
-  where initial_variance = M.map mempty $ scopeOfKernelSpace space
--}
+      (extra_stms, lvl', space', kbody') <- tileInKernelBody mempty initial_variance lvl space kbody
+      return $ extra_stms <>
+        oneStm (Let pat aux $ Op $ SegOp $ SegMap lvl' space' ts kbody')
+  where initial_variance = M.map mempty $ scopeOfSegSpace space
+
 optimiseStm (Let pat aux e) =
   pure <$> (Let pat aux <$> mapExpM optimise e)
   where optimise = identityMapper { mapOnBody = const optimiseBody }
-{-
+
 tileInKernelBody :: Names -> VarianceTable
-                 -> KernelSpace -> KernelBody InKernel
-                 -> TileM (Stms Kernels, KernelSpace, KernelBody InKernel)
-tileInKernelBody branch_variant initial_variance initial_kspace (KernelBody () kstms kres) = do
-  (extra_bnds, kspace', kstms') <-
-    tileInStms branch_variant initial_variance initial_kspace kstms
-  return (extra_bnds, kspace', KernelBody () kstms' kres)
+                 -> SegLevel -> SegSpace -> KernelBody Kernels
+                 -> TileM (Stms Kernels, SegLevel, SegSpace, KernelBody Kernels)
+tileInKernelBody branch_variant initial_variance lvl initial_kspace (KernelBody () kstms kres) = do
+  (extra_stms, lvl', kspace', kstms') <-
+    tileInStms branch_variant initial_variance lvl initial_kspace kstms
+  return (extra_stms, lvl', kspace', KernelBody () kstms' kres)
 
 tileInBody :: Names -> VarianceTable
-           -> KernelSpace -> Body InKernel
-           -> TileM (Stms Kernels, KernelSpace, Body InKernel)
-tileInBody branch_variant initial_variance initial_kspace (Body () stms res) = do
-  (extra_bnds, kspace', stms') <-
-    tileInStms branch_variant initial_variance initial_kspace stms
-  return (extra_bnds, kspace', Body () stms' res)
+           -> SegLevel -> SegSpace -> Body Kernels
+           -> TileM (Stms Kernels, SegLevel, SegSpace, Body Kernels)
+tileInBody branch_variant initial_variance lvl initial_kspace (Body () stms res) = do
+  (extra_stms, lvl', kspace', stms') <-
+    tileInStms branch_variant initial_variance lvl initial_kspace stms
+  return (extra_stms, lvl', kspace', Body () stms' res)
 
 tileInStms :: Names -> VarianceTable
-           -> KernelSpace -> Stms InKernel
-           -> TileM (Stms Kernels, KernelSpace, Stms InKernel)
-tileInStms branch_variant initial_variance initial_kspace kstms = do
-  ((kspace, extra_bndss), kstms') <-
-    mapAccumLM tileInKernelStatement (initial_kspace,mempty) $ stmsToList kstms
-  return (extra_bndss, kspace, stmsFromList kstms')
+           -> SegLevel -> SegSpace -> Stms Kernels
+           -> TileM (Stms Kernels, SegLevel, SegSpace, Stms Kernels)
+tileInStms branch_variant initial_variance initial_lvl initial_kspace kstms = do
+  ((extra_stms, lvl, space), kstms') <-
+    mapAccumLM tileInKernelStatement (mempty, initial_lvl, initial_kspace) $ stmsToList kstms
+  return (extra_stms, lvl, space, stmsFromList kstms')
   where variance = varianceInStms initial_variance kstms
-
+{-
         tileInKernelStatement (kspace, extra_bnds)
           (Let pat attr (Op (GroupStream w max_chunk lam accs arrs)))
           | max_chunk == w,
@@ -178,19 +172,10 @@ tileInStms branch_variant initial_variance initial_kspace kstms = do
           (bnds, kspace', lam') <- tileInStreamLambda branch_variant' variance kspace lam
           return ((kspace', extra_bnds <> bnds),
                   Let pat attr $ Op $ GroupStream w maxchunk lam' accs arrs)
-
+-}
         tileInKernelStatement acc stm =
           return (acc, stm)
-
-tileInStreamLambda :: Names -> VarianceTable -> KernelSpace -> GroupStreamLambda InKernel
-                   -> TileM (Stms Kernels, KernelSpace, GroupStreamLambda InKernel)
-tileInStreamLambda branch_variant variance kspace lam = do
-  (bnds, kspace', kbody') <-
-    tileInBody branch_variant variance' kspace $ groupStreamLambdaBody lam
-  return (bnds, kspace', lam { groupStreamLambdaBody = kbody' })
-  where variance' = varianceInStms variance $
-                    bodyStms $ groupStreamLambdaBody lam
-
+{-
 is1dTileable :: MonadFreshNames m =>
                 Names -> KernelSpace -> VarianceTable -> SubExp -> VName -> LParam InKernel
              -> Maybe (m ((KernelSpace, Stms Kernels),
@@ -360,7 +345,7 @@ syncAtEnd (Body () stms res) = do
     mapM_ addStm stms
     map Var <$> letTupExp "sync" (Op $ Barrier res)
   return $ Body () stms' res'
-
+-}
 -- | The variance table keeps a mapping from a variable name
 -- (something produced by a 'Stm') to the kernel thread indices
 -- that name depends on.  If a variable is not present in this table,
@@ -368,10 +353,10 @@ syncAtEnd (Body () stms res) = do
 -- invariant to all dimensions).
 type VarianceTable = M.Map VName Names
 
-varianceInStms :: VarianceTable -> Stms InKernel -> VarianceTable
+varianceInStms :: VarianceTable -> Stms Kernels -> VarianceTable
 varianceInStms = foldl varianceInStm
 
-varianceInStm :: VarianceTable -> Stm InKernel -> VarianceTable
+varianceInStm :: VarianceTable -> Stm Kernels -> VarianceTable
 varianceInStm variance bnd =
   foldl' add variance $ patternNames $ stmPattern bnd
   where add variance' v = M.insert v binding_variance variance'
@@ -389,4 +374,3 @@ sufficientGroups gspace group_size = do
   num_threads <- letSubExp "num_threads" $
                  BasicOp $ BinOp (Mul Int32) num_groups group_size
   return (num_threads, num_groups)
--}
