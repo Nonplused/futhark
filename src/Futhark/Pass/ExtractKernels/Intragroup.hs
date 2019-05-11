@@ -40,7 +40,7 @@ intraGroupParallelise :: (MonadFreshNames m, LocalScope Out.Kernels m) =>
                       -> m (Maybe ((SubExp, SubExp), SubExp,
                                    Out.Stms Out.Kernels, Out.Stms Out.Kernels))
 intraGroupParallelise knest lam = runMaybeT $ do
-  (w_stms, w, ispace, inps, rts) <- lift $ flatKernel knest
+  (w_stms, w, ispace, inps) <- lift $ flatKernel knest
   let num_groups = w
       body = lambdaBody lam
 
@@ -100,7 +100,8 @@ intraGroupParallelise knest lam = runMaybeT $ do
         return $ PatElem name t'
   flat_pat <- lift $ Pattern [] <$> mapM flatPatElem (patternValueElements nested_pat)
 
-  let lvl = SegGroup (Count num_groups) (Count $ Var group_size)
+  let rts = map rowType $ patternTypes flat_pat
+      lvl = SegGroup (Count num_groups) (Count $ Var group_size)
       kstm = Let flat_pat (StmAux cs ()) $ Op $ SegOp $ SegMap lvl kspace rts kbody'
       reshapeStm nested_pe flat_pe =
         Let (Pattern [] [nested_pe]) (StmAux cs ()) $
