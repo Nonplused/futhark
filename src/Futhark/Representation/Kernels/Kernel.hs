@@ -147,7 +147,7 @@ instance FreeIn KernelResult where
 instance Attributes lore => FreeIn (KernelBody lore) where
   freeIn (KernelBody attr stms res) =
     (freeIn attr <> free_in_stms <> free_in_res) `S.difference` bound_in_stms
-    where free_in_stms = fold $ fmap freeInStm stms
+    where free_in_stms = fold $ fmap freeIn stms
           free_in_res = freeIn res
           bound_in_stms = fold $ fmap boundByStm stms
 
@@ -577,7 +577,7 @@ instance (Attributes lore, FreeIn (LParamAttr lore)) =>
   freeIn e = execWriter $ mapSegOpM free e
     where walk f x = tell (f x) >> return x
           free = SegOpMapper { mapOnSegOpSubExp = walk freeIn
-                             , mapOnSegOpLambda = walk freeInLambda
+                             , mapOnSegOpLambda = walk freeIn
                              , mapOnSegOpBody = walk freeIn
                              , mapOnSegOpVName = walk freeIn
                              }

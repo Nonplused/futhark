@@ -870,7 +870,7 @@ leavingNesting (MapLoop _ cs w lam arrs) acc =
      if null $ kernelStms acc'
        then return acc'
        else do let body = Body () (kernelStms acc') res
-                   used_in_body = freeInBody body
+                   used_in_body = freeIn body
                    (used_params, used_arrs) =
                      unzip $
                      filter ((`S.member` used_in_body) . paramName . fst) $
@@ -1152,7 +1152,7 @@ distributeSingleUnaryStm acc bnd f =
       | res == map Var (patternNames $ stmPattern bnd),
         (outer, inners) <- nest,
         [(arr_p, arr)] <- loopNestingParamsAndArrs outer,
-        boundInKernelNest nest `S.intersection` freeInStm bnd
+        boundInKernelNest nest `S.intersection` freeIn bnd
         == S.singleton (paramName arr_p) -> do
           addKernels kernels
           let outerpat = loopNestingPattern $ fst nest
@@ -1351,7 +1351,7 @@ segmentedScanomapKernel :: KernelNest
                         -> [SubExp] -> [VName]
                         -> KernelM (Maybe KernelsStms)
 segmentedScanomapKernel nest perm segment_size lam map_lam nes arrs =
-  isSegmentedOp nest perm segment_size (freeInLambda lam) (freeInLambda map_lam) nes arrs $
+  isSegmentedOp nest perm segment_size (freeIn lam) (freeIn map_lam) nes arrs $
   \pat ispace inps nes' _ _ ->
     addStms =<< traverse renameStm =<<
     segScan pat segment_size lam map_lam nes' arrs ispace inps
@@ -1363,7 +1363,7 @@ regularSegmentedRedomapKernel :: KernelNest
                               -> [SubExp] -> [VName]
                               -> KernelM (Maybe KernelsStms)
 regularSegmentedRedomapKernel nest perm segment_size comm lam map_lam nes arrs =
-  isSegmentedOp nest perm segment_size (freeInLambda lam) (freeInLambda map_lam) nes arrs $
+  isSegmentedOp nest perm segment_size (freeIn lam) (freeIn map_lam) nes arrs $
   \pat ispace inps nes' _ _ ->
     addStms =<< traverse renameStm =<<
     segRed pat segment_size comm lam map_lam nes' arrs ispace inps

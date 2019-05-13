@@ -264,8 +264,7 @@ constructKernel kernel_nest inner_body = runBinder $ do
   return (w, Let pat (StmAux cs ()) $ Op $ SegOp segop)
   where
     first_nest = fst kernel_nest
-    inputIsUsed input = kernelInputName input `S.member`
-                        freeInBody inner_body
+    inputIsUsed input = kernelInputName input `S.member` freeIn inner_body
 
 -- | Flatten a kernel nesting to:
 --
@@ -333,7 +332,7 @@ distributionBodyFromStms (Targets (inner_pat, inner_res) targets) stms =
         removeIdentityMappingGeneral bound_by_stms inner_pat inner_res
   in (DistributionBody
       { distributionTarget = Targets (inner_pat', inner_res') targets
-      , distributionFreeInBody = fold (fmap freeInStm stms) `S.difference` bound_by_stms
+      , distributionFreeInBody = fold (fmap freeIn stms) `S.difference` bound_by_stms
       , distributionIdentityMap = inner_identity_map
       , distributionExpandTarget = inner_expand_target
       },

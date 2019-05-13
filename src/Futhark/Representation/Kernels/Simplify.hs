@@ -246,7 +246,7 @@ distributeKernelResults (vtable, used)
   addStm $ Let (Pattern [] kpes') attr $ Op $ SegOp $
     SegMap lvl space kts' $ mkWiseKernelBody () (stmsFromList $ reverse kstms_rev) kres'
   where
-    free_in_kstms = fold $ fmap freeInStm kstms
+    free_in_kstms = fold $ fmap freeIn kstms
 
     distribute (kpes', kts', kres', kstms_rev) bnd
       | Let (Pattern [] [pe]) _ (BasicOp (Index arr slice)) <- bnd,
