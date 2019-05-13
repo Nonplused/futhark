@@ -11,6 +11,7 @@ import Control.Monad.Writer
 import Data.List (find)
 import Data.Maybe (mapMaybe)
 import Data.Either
+import qualified Data.Map as M
 import qualified Data.Set as S
 
 import Futhark.Representation.AST.Attributes.Aliases
@@ -36,20 +37,21 @@ instance Functor DesiredUpdate where
 updateHasValue :: VName -> DesiredUpdate attr -> Bool
 updateHasValue name = (name==) . updateValue
 
-type LowerUpdate lore m = Stm (Aliases lore)
+type LowerUpdate lore m = Scope (Aliases lore)
+                          -> Stm (Aliases lore)
                           -> [DesiredUpdate (LetAttr (Aliases lore))]
                           -> Maybe (m [Stm (Aliases lore)])
 
 lowerUpdate :: (MonadFreshNames m, Bindable lore,
                 LetAttr lore ~ Type, CanBeAliased (Op lore)) => LowerUpdate lore m
-lowerUpdate (Let pat aux (DoLoop ctx val form body)) updates = do
-  canDo <- lowerUpdateIntoLoop updates pat ctx val body
+lowerUpdate scope (Let pat aux (DoLoop ctx val form body)) updates = do
+  canDo <- lowerUpdateIntoLoop scope updates pat ctx val form body
   Just $ do
     (prebnds, postbnds, ctxpat, valpat, ctx', val', body') <- canDo
     return $
       prebnds ++ [certify (stmAuxCerts aux) $
                   mkLet ctxpat valpat $ DoLoop ctx' val' form body'] ++ postbnds
-lowerUpdate
+lowerUpdate _
   (Let pat aux (BasicOp (SubExp (Var v))))
   [DesiredUpdate bindee_nm bindee_attr cs src is val]
   | patternNames pat == [src] =
@@ -58,11 +60,11 @@ lowerUpdate
        return [certify (stmAuxCerts aux <> cs) $
                mkLet [] [Ident bindee_nm $ typeOf bindee_attr] $
                BasicOp $ Update v is' $ Var val]
-lowerUpdate _ _ =
+lowerUpdate _ _ _ =
   Nothing
 
 lowerUpdateKernels :: MonadFreshNames m => LowerUpdate Kernels m
-lowerUpdateKernels
+lowerUpdateKernels _
   (Let (Pattern [] [PatElem v v_attr]) aux (Op (SegOp (SegMap lvl space ts kbody))))
   [update@(DesiredUpdate bindee_nm bindee_attr cs _src is val)]
   | v == val = do
@@ -72,7 +74,7 @@ lowerUpdateKernels
                     mkLet [] [Ident bindee_nm $ typeOf bindee_attr] $
                     Op $ SegOp $ SegMap lvl space ts kbody',
                    mkLet [] [Ident v $ typeOf v_attr] $ BasicOp $ Index bindee_nm is']
-lowerUpdateKernels stm updates = lowerUpdate stm updates
+lowerUpdateKernels scope stm updates = lowerUpdate scope stm updates
 
 lowerUpdateIntoKernel :: DesiredUpdate (LetAttr (Aliases Kernels))
                       -> SegSpace -> KernelBody (Aliases Kernels)
@@ -88,10 +90,12 @@ lowerUpdateIntoKernel update kspace kbody = do
 lowerUpdateIntoLoop :: (Bindable lore, BinderOps lore,
                         Aliased lore, LetAttr lore ~ (als, Type),
                         MonadFreshNames m) =>
-                       [DesiredUpdate (LetAttr lore)]
+                       Scope lore
+                    -> [DesiredUpdate (LetAttr lore)]
                     -> Pattern lore
                     -> [(FParam lore, SubExp)]
                     -> [(FParam lore, SubExp)]
+                    -> LoopForm lore
                     -> Body lore
                     -> Maybe (m ([Stm lore],
                                  [Stm lore],
@@ -100,7 +104,7 @@ lowerUpdateIntoLoop :: (Bindable lore, BinderOps lore,
                                  [(FParam lore, SubExp)],
                                  [(FParam lore, SubExp)],
                                  Body lore))
-lowerUpdateIntoLoop updates pat ctx val body = do
+lowerUpdateIntoLoop scope updates pat ctx val form body = do
   -- Algorithm:
   --
   --   0) Map each result of the loop body to a corresponding in-place
@@ -136,7 +140,10 @@ lowerUpdateIntoLoop updates pat ctx val body = do
     (body_res, res_bnds) <- manipulateResult in_place_map idxsubsts'
     let body' = mkBody (newbnds<>res_bnds) body_res
     return (prebnds, postbnds, ctxpat, valpat, ctx, val', body')
-  where usedInBody = freeInBody body
+  where usedInBody = S.unions $ map expandAliases $ S.toList $ freeInBody body <> freeIn form
+        expandAliases v = case M.lookup v scope of
+                            Just (LetInfo attr) -> S.insert v $ aliasesOf attr
+                            _ -> S.singleton v
         resmap = zip (bodyResult body) $ patternValueIdents pat
 
         mkMerges :: (MonadFreshNames m, Bindable lore) =>
