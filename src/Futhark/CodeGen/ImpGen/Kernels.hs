@@ -33,11 +33,11 @@ import Futhark.Util.IntegralExp (quot, IntegralExp)
 callKernelOperations :: Operations ExplicitMemory Imp.HostOp
 callKernelOperations =
   Operations { opsExpCompiler = expCompiler
-                    , opsCopyCompiler = callKernelCopy
-                    , opsOpCompiler = opCompiler
-                    , opsStmsCompiler = defCompileStms
-                    , opsAllocCompilers = mempty
-                    }
+             , opsCopyCompiler = callKernelCopy
+             , opsOpCompiler = opCompiler
+             , opsStmsCompiler = defCompileStms
+             , opsAllocCompilers = mempty
+             }
 
 compileProg :: MonadFreshNames m => Prog ExplicitMemory -> m (Either InternalError Imp.Program)
 compileProg prog =
@@ -80,8 +80,8 @@ segOpCompiler pat (SegScan lvl@SegThread{} space scan_op nes _ kbody) =
   compileSegScan pat lvl space scan_op nes kbody
 segOpCompiler pat (SegGenRed (SegThread num_groups group_size) space ops _ kbody) =
   compileSegGenRed pat num_groups group_size space ops kbody
-segOpCompiler pat _ =
-  compilerBugS $ "segOpCompiler: unexpected SegGroup for rhs of pattern " ++ pretty pat
+segOpCompiler pat segop =
+  compilerBugS $ "segOpCompiler: unexpected " ++ pretty (segLevel segop) ++ " for rhs of pattern " ++ pretty pat
 
 expCompiler :: ExpCompiler ExplicitMemory Imp.HostOp
 

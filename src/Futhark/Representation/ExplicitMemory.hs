@@ -80,6 +80,9 @@ module Futhark.Representation.ExplicitMemory
        , ixFunMatchesInnerShape
        , existentialiseIxFun
 
+       , scalarMemory
+       , allScalarMemory
+
          -- * Module re-exports
        , module Futhark.Representation.AST.Attributes
        , module Futhark.Representation.AST.Traversals
@@ -1029,3 +1032,12 @@ ixFunMatchesInnerShape :: (Eq num, IntegralExp num) =>
                           ShapeBase num -> IxFun.IxFun num -> Bool
 ixFunMatchesInnerShape shape ixfun =
   drop 1 (IxFun.shape ixfun) == drop 1 (shapeDims shape)
+
+-- | Construct the scalar memory space corresponding to a given primitive type.
+scalarMemory :: PrimType -> SpaceId
+scalarMemory = ("scalar_"++) . pretty
+
+-- | A mapping from all scalar memory spaces to the 'PrimType' they
+-- store.
+allScalarMemory :: M.Map SpaceId PrimType
+allScalarMemory = M.fromList $ zip (map scalarMemory allPrimTypes) allPrimTypes

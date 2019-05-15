@@ -128,7 +128,7 @@ data KernelResult = ThreadsReturn SubExp
                   | ConcatReturns
                     SplitOrdering -- Permuted?
                     SubExp -- The final size.
-                    SubExp -- Per-thread (max) chunk size.
+                    SubExp -- Per-thread/group (max) chunk size.
                     (Maybe SubExp) -- Optional precalculated offset.
                     VName -- Chunk by this thread.
                   deriving (Eq, Show, Ord)
@@ -287,6 +287,13 @@ data SegLevel = SegThread { segNumGroups :: Count NumGroups SubExp,
                             segGroupSize :: Count GroupSize SubExp }
               | SegGroup { segNumGroups :: Count NumGroups SubExp,
                            segGroupSize :: Count GroupSize SubExp }
+              | SegThreadScalar { segNumGroups :: Count NumGroups SubExp,
+                                  segGroupSize :: Count GroupSize SubExp }
+                -- ^ Like 'SegThread', but with the invariant that the
+                -- results produced are only used within the same
+                -- physical thread later on, and can thus be kept in
+                -- registers.  May only occur within an enclosing
+                -- 'SegGroup' construct.
               deriving (Eq, Ord, Show)
 
 -- | Index space of a 'SegOp'.
@@ -518,6 +525,10 @@ mapOnSegLevel tv (SegGroup num_groups group_size) =
   SegGroup
   <$> traverse (mapOnSegOpSubExp tv) num_groups
   <*> traverse (mapOnSegOpSubExp tv) group_size
+mapOnSegLevel tv (SegThreadScalar num_groups group_size) =
+  SegThreadScalar
+  <$> traverse (mapOnSegOpSubExp tv) num_groups
+  <*> traverse (mapOnSegOpSubExp tv) group_size
 
 mapOnSegOpType :: Monad m =>
                   SegOpMapper flore tlore m -> Type -> m Type
@@ -600,6 +611,7 @@ instance Pretty SegSpace where
 
 instance PP.Pretty SegLevel where
   ppr SegThread{} = "thread"
+  ppr SegThreadScalar{} = "scalar"
   ppr SegGroup{} = "group"
 
 instance PrettyLore lore => PP.Pretty (SegOp lore) where

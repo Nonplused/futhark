@@ -28,6 +28,7 @@ import qualified Futhark.CodeGen.ImpCode.Kernels as ImpKernels
 import Futhark.CodeGen.ImpCode.OpenCL hiding (Program)
 import qualified Futhark.CodeGen.ImpCode.OpenCL as ImpOpenCL
 import Futhark.MonadFreshNames
+import Futhark.Representation.ExplicitMemory (allScalarMemory)
 import Futhark.Util (zEncodeString)
 import Futhark.Util.Pretty (pretty)
 
@@ -406,8 +407,8 @@ inKernelOperations :: GenericC.Operations KernelOp KernelRequirements
 inKernelOperations = GenericC.Operations
                      { GenericC.opsCompiler = kernelOps
                      , GenericC.opsMemoryType = kernelMemoryType
-                     , GenericC.opsWriteScalar = GenericC.writeScalarPointerWithQuals pointerQuals
-                     , GenericC.opsReadScalar = GenericC.readScalarPointerWithQuals pointerQuals
+                     , GenericC.opsWriteScalar = kernelWriteScalar
+                     , GenericC.opsReadScalar = kernelReadScalar
                      , GenericC.opsAllocate = cannotAllocate
                      , GenericC.opsDeallocate = cannotDeallocate
                      , GenericC.opsCopy = copyInKernel
@@ -521,9 +522,29 @@ inKernelOperations = GenericC.Operations
         noStaticArrays _ _ _ _ =
           fail "Cannot create static array in kernel."
 
+        kernelMemoryType space
+          | Just t <- M.lookup space allScalarMemory =
+              return $ GenericC.primTypeToCType t
+
         kernelMemoryType space = do
           quals <- pointerQuals space
           return [C.cty|$tyquals:quals $ty:defaultMemBlockType|]
+
+        kernelWriteScalar dest _ _ space _ v
+          | space `M.member` allScalarMemory =
+              GenericC.stm [C.cstm|$exp:dest = $exp:v;|]
+
+        kernelWriteScalar dest i elemtype space vol v =
+          GenericC.writeScalarPointerWithQuals pointerQuals
+          dest i elemtype space vol v
+
+        kernelReadScalar dest _ _ space _
+          | space `M.member` allScalarMemory =
+              return dest
+
+        kernelReadScalar dest i elemtype space vol =
+          GenericC.readScalarPointerWithQuals pointerQuals
+          dest i elemtype space vol
 
 --- Checking requirements
 

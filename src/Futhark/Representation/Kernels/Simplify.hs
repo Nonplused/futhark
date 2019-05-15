@@ -208,6 +208,11 @@ kernelRules = standardRules <>
 removeInvariantKernelResults :: TopDownRuleOp (Wise Kernels)
 removeInvariantKernelResults vtable (Pattern [] kpes) attr
                              (SegOp (SegMap lvl space ts (KernelBody _ kstms kres))) = do
+
+  case lvl of
+    SegThreadScalar{} -> cannotSimplify
+    _ -> return ()
+
   (ts', kpes', kres') <-
     unzip3 <$> filterM checkForInvarianceResult (zip3 ts kpes kres)
 

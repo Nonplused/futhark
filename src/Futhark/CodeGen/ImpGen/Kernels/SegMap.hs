@@ -20,26 +20,35 @@ compileSegMap :: Pattern ExplicitMemory
               -> KernelBody ExplicitMemory
               -> CallKernelGen ()
 
-compileSegMap pat (SegThread num_groups group_size) space kbody = do
+compileSegMap _ SegThreadScalar{} _ _ =
+  fail "compileSegMap: SegThreadScalar cannot be compiled at top level."
+
+compileSegMap pat lvl space kbody = do
   let (is, dims) = unzip $ unSegSpace space
   dims' <- mapM toExp dims
 
-  num_groups' <- traverse toExp num_groups
-  group_size' <- traverse toExp group_size
+  num_groups' <- traverse toExp $ segNumGroups lvl
+  group_size' <- traverse toExp $ segGroupSize lvl
 
-  sKernelThread "segmap" num_groups' group_size' (segFlat space) $ \constants -> do
-    zipWithM_ dPrimV_ is $ unflattenIndex dims' $ Imp.vi32 $ segFlat space
-    sWhen (isActive $ unSegSpace space) $
+  case lvl of
+    SegThreadScalar{} ->
+      fail "compileSegMap: SegThreadScalar cannot be compiled at top level."
+
+    SegThread{} ->
+      sKernelThread "segmap" num_groups' group_size' (segFlat space) $ \constants -> do
+
+      zipWithM_ dPrimV_ is $ unflattenIndex dims' $ Imp.vi32 $ segFlat space
+
+      sWhen (isActive $ unSegSpace space) $
+        compileStms mempty (kernelBodyStms kbody) $
+        zipWithM_ (compileThreadResult space constants) (patternElements pat) $
+        kernelBodyResult kbody
+
+    SegGroup{} ->
+      sKernelGroup "segmap" num_groups' group_size' (segFlat space) $ \constants -> do
+
+      zipWithM_ dPrimV_ is $ unflattenIndex dims' $ Imp.vi32 $ segFlat space
+
       compileStms mempty (kernelBodyStms kbody) $
-      zipWithM_ (compileKernelResult space constants) (patternElements pat) $
-      kernelBodyResult kbody
-{-
-compileSegMap pat (SegGroup num_groups group_size) space kbody = do
-  (constants, setConstants) <- initSegMap num_groups group_size space
-
-  sKernelGroup constants "segmap" (Just $ segFlat space) $ do
-    setConstants $ kernelGroupId constants
-    compileStms mempty (kernelBodyStms kbody) $
-      zipWithM_ (compileKernelResult space constants) (patternElements pat) $
-      kernelBodyResult kbody
--}
+        zipWithM_ (compileGroupResult space constants) (patternElements pat) $
+        kernelBodyResult kbody

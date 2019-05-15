@@ -537,6 +537,7 @@ handleSegOp op = allocAtLevel (segLevel op) $ do
 allocAtLevel :: SegLevel -> AllocM fromlore tlore a -> AllocM fromlore tlore a
 allocAtLevel lvl = local $ \env -> env { allocSpace = space }
   where space = case lvl of SegThread{} -> DefaultSpace
+                            SegThreadScalar{} -> DefaultSpace
                             SegGroup{} -> Space "local"
 
 bodyReturnMemCtx :: (Allocable fromlore tolore, Allocator tolore (AllocM fromlore tolore)) =>
@@ -853,10 +854,10 @@ kernelExpHints (BasicOp (Manifest perm v)) = do
               perm_inv
   return [Hint ixfun DefaultSpace]
 
-kernelExpHints (Op (Inner (SegOp (SegMap lvl space ts body)))) =
+kernelExpHints (Op (Inner (SegOp (SegMap lvl@SegThread{} space ts body)))) =
   zipWithM (mapResultHint lvl space) ts $ kernelBodyResult body
 
-kernelExpHints (Op (Inner (SegOp (SegRed lvl space _ _ nes ts body)))) =
+kernelExpHints (Op (Inner (SegOp (SegRed lvl@SegThread{} space _ _ nes ts body)))) =
   (map (const NoHint) red_res <>) <$>
   zipWithM (mapResultHint lvl space) (drop (length nes) ts) map_res
   where (red_res, map_res) = splitAt (length nes) $ kernelBodyResult body
@@ -908,6 +909,14 @@ innermost space_dims t_dims =
   in ixfun_rearranged
 
 inKernelExpHints :: Allocator ExplicitMemory m => Exp ExplicitMemory -> m [ExpHint]
+inKernelExpHints (Op (Inner (SegOp (SegMap SegThreadScalar{} space ts _)))) = return $ do
+  t <- ts
+  case t of
+    Prim pt ->
+      return $ Hint (IxFun.iota $ map (primExpFromSubExp int32) $
+                     segSpaceDims space ++ arrayDims t) $ Space $ scalarMemory pt
+    _ ->
+      return NoHint
 inKernelExpHints e =
   mapM maybePrivate =<< expExtType e
   where maybePrivate t

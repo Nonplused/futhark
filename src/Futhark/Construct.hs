@@ -29,6 +29,7 @@ module Futhark.Construct
   , eRoundToMultipleOf
   , eSliceArray
   , eSplitArray
+  , eBlank
 
   , eOutOfBounds
   , eWriteArray
@@ -324,6 +325,12 @@ eWriteArray arr is v = do
   return $
     If outside_bounds outside_bounds_branch in_bounds_branch $
     ifCommon [arr_t]
+
+-- | Construct an unspecified value of the given type.
+eBlank :: MonadBinder m => Type -> m (Exp (Lore m))
+eBlank (Prim t) = return $ BasicOp $ SubExp $ Constant $ blankPrimValue t
+eBlank (Array pt shape _) = return $ BasicOp $ Scratch pt $ shapeDims shape
+eBlank Mem{} = fail "eBlank: cannot create blank memory"
 
 -- | Sign-extend to the given integer type.
 asIntS :: MonadBinder m => IntType -> SubExp -> m SubExp

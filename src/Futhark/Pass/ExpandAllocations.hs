@@ -72,28 +72,6 @@ nameInfoConv (LParamInfo mem_info) = LParamInfo mem_info
 nameInfoConv (IndexInfo it) = IndexInfo it
 
 transformExp :: Exp ExplicitMemory -> ExpandM (Stms ExplicitMemory, Exp ExplicitMemory)
-{-
-transformExp (Op (Inner (SegOp (SegMap lvl space ts kbody)))) = do
-  let (kbody', allocs) = extractKernelBodyAllocations kbody
-      variantAlloc (Var v) = v `S.member` bound_in_kernel
-      variantAlloc _ = False
-      (variant_allocs, invariant_allocs) = M.partition (variantAlloc . fst) allocs
-
-  (alloc_offsets, alloc_stms) <-
-    memoryRequirements lvl space (kernelBodyStms kbody) variant_allocs invariant_allocs
-
-  scope <- askScope
-  let scope' = scopeOfSegSpace space <> M.map nameInfoConv scope
-  kbody'' <- either compilerLimitationS pure $
-             runOffsetM scope' alloc_offsets $ offsetMemoryInKernelBody kbody'
-
-  return (alloc_stms,
-          Op $ Inner $ SegOp $ SegMap lvl space ts kbody'')
-
-  where bound_in_kernel =
-          S.fromList $ M.keys $ scopeOfSegSpace space <>
-          scopeOf (kernelBodyStms kbody)
--}
 
 transformExp (Op (Inner (SegOp (SegMap lvl space ts kbody)))) = do
   (alloc_stms, (_, kbody')) <- transformScanRed lvl space no_op kbody
@@ -243,7 +221,9 @@ extractThreadAllocations bnds =
   let (allocs, bnds') = mapAccumL isAlloc M.empty $ stmsToList bnds
   in (stmsFromList $ catMaybes bnds', allocs)
   where isAlloc allocs (Let (Pattern [] [patElem]) _ (Op (Alloc size space)))
-          | space `notElem` [Space "private", Space "local"] =
+          | space `notElem`
+            [Space "private", Space "local"] ++
+            map Space (M.keys allScalarMemory) =
           (M.insert (patElemName patElem) (size, space) allocs,
            Nothing)
 

@@ -99,7 +99,7 @@ compileSegRed pat lvl space comm red_op nes body =
 
   sComment "save map-out results" $ do
     let map_arrs = drop (length nes) $ patternElements pat
-    zipWithM_ (compileKernelResult space constants) map_arrs map_res
+    zipWithM_ (compileThreadResult space constants) map_arrs map_res
 
 -- | Like 'compileSegRed', but where the body is a monadic action.
 compileSegRed' :: Pattern ExplicitMemory
