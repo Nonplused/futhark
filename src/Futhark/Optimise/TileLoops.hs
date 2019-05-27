@@ -89,20 +89,39 @@ tileInStms branch_variant initial_variance initial_lvl initial_space res_ts (Bod
       return (mempty, initial_lvl, initial_space, KernelBody () prestms $ map ThreadsReturn stms_res)
     descend prestms (stm:poststms)
       -- 1D tiling of redomap.
-      | [(gtid, kdim)] <- unSegSpace initial_space,
-        Op (OtherOp (Screma w form arrs)) <- stmExp stm,
-        Just (red_comm, red_lam, red_nes, map_lam) <- isRedomapSOAC form,
-        not $ null arrs,
-        all (S.null . flip (M.findWithDefault mempty) variance) arrs,
-        all primType $ lambdaReturnType map_lam,
-        all (primType . paramType) $ lambdaParams map_lam =
+      | [dim] <- unSegSpace initial_space,
+        Just (w, arrs, form) <- tileable variance stm =
           tile1D initial_lvl prestms res_ts (stmPattern stm)
-          (gtid, kdim) w (red_comm, red_lam, red_nes, map_lam) arrs
-          poststms stms_res
+          dim w form arrs poststms stms_res
+
+      -- 1D tiling of redomap.
+      | [dim_x, dim_y] <- unSegSpace initial_space,
+        Just (w, arrs, form) <- tileable variance stm =
+          tile2D initial_lvl prestms res_ts (stmPattern stm)
+          dim_x dim_y  w form arrs poststms stms_res
 
       | otherwise =
           localScope (scopeOf stm) $
           descend (prestms <> oneStm stm) poststms
+
+tileable :: VarianceTable -> Stm Kernels
+         -> Maybe (SubExp, [VName],
+                   (Commutativity, Lambda Kernels, [SubExp], Lambda Kernels))
+tileable variance stm
+  | Op (OtherOp (Screma w form arrs)) <- stmExp stm,
+    Just (red_comm, red_lam, red_nes, map_lam) <- isRedomapSOAC form,
+    not $ null arrs,
+    all (S.null . flip (M.findWithDefault mempty) variance) arrs,
+    all primType $ lambdaReturnType map_lam,
+    all (primType . paramType) $ lambdaParams map_lam =
+      Just (w, arrs, (red_comm, red_lam, red_nes, map_lam))
+  | otherwise =
+      Nothing
+
+liveSet :: FreeIn a => Stms Kernels -> a -> Names
+liveSet stms after =
+  S.fromList (concatMap (patternNames . stmPattern) stms) `S.intersection`
+  freeIn after
 
 data TileKind = TilePartial | TileFull
 
@@ -226,17 +245,16 @@ tile1D :: SegLevel -> Stms Kernels -> [Type] -> Pattern Kernels
        -> SubExp -> (Commutativity, Lambda Kernels, [SubExp], Lambda Kernels) -> [VName]
        -> [Stm Kernels] -> [SubExp]
        -> TileM (Stms Kernels, SegLevel, SegSpace, KernelBody Kernels)
-tile1D initial_lvl prestms res_ts pat (gtid, kdim) w (red_comm, red_lam, red_nes, map_lam) arrs poststms poststms_res = do
+tile1D initial_lvl prestms res_ts pat (gtid, kdim) w form arrs poststms poststms_res = do
   -- Figure out which of values produced by the prelude
   -- statements are still alive.
   let prestms_live =
-        S.toList $
-        S.fromList (concatMap (patternNames . stmPattern) $
-                     stmsToList prestms) `S.intersection`
-        (freeIn poststms <> freeIn w <>
-         freeIn red_lam <> freeIn red_nes <> freeIn map_lam)
+        S.toList $ liveSet prestms $
+        freeIn poststms <> freeIn w <>
+        freeIn red_lam <> freeIn red_nes <> freeIn map_lam
       group_size = unCount $ segGroupSize initial_lvl
       red_ts = lambdaReturnType red_lam
+      (red_comm, red_lam, red_nes, map_lam) = form
 
   gid <- newVName "gid"
 
@@ -327,6 +345,45 @@ tile1D initial_lvl prestms res_ts pat (gtid, kdim) w (red_comm, red_lam, red_nes
       space = SegSpace gid_flat [(gid, unCount $ segNumGroups lvl)]
       new_res = map (ConcatReturns SplitContiguous kdim group_size Nothing) stms_res_arrs
   return (mempty, lvl, space, KernelBody () kstms new_res)
+
+tile2D :: SegLevel -> Stms Kernels -> [Type] -> Pattern Kernels
+       -> (VName, SubExp) -> (VName, SubExp)
+       -> SubExp -> (Commutativity, Lambda Kernels, [SubExp], Lambda Kernels) -> [VName]
+       -> [Stm Kernels] -> [SubExp]
+       -> TileM (Stms Kernels, SegLevel, SegSpace, KernelBody Kernels)
+tile2D initial_lvl prestms res_ts pat (gtid_x, kdim_x) (gtid_y, kdim_y) w form arrs poststms poststms_res = do
+  -- Figure out which of values produced by the prelude
+  -- statements are still alive.
+  let prestms_live =
+        S.toList $
+        S.fromList (concatMap (patternNames . stmPattern) $
+                     stmsToList prestms) `S.intersection`
+        (freeIn poststms <> freeIn w <>
+         freeIn red_lam <> freeIn red_nes <> freeIn map_lam)
+      (red_comm, red_lam, red_nes, map_lam) = form
+      group_size = unCount $ segGroupSize initial_lvl
+      red_ts = lambdaReturnType red_lam
+
+  gid_x <- newVName "gid_x"
+  gid_y <- newVName "gid_y"
+
+  ((tile_size, num_threads, num_groups), prestms) <- runBinder $ do
+    tile_size_key <-
+      nameFromString . pretty <$> newVName "tile_size"
+    tile_size <- letSubExp "tile_size" $ Op $ GetSize tile_size_key SizeTile
+
+    (num_threads, num_groups) <-
+      sufficientGroups [(kdim_x, tile_size), (kdim_y, tile_size)] group_size
+    return (tile_size, num_threads, num_groups)
+
+  let kstms = mempty
+      stms_res_arrs = mempty
+
+  gid_flat <- newVName "gid_flat"
+  let lvl = SegGroup (segNumGroups initial_lvl) (segGroupSize initial_lvl)
+      space = SegSpace gid_flat [(gid_x, unCount $ segNumGroups lvl)]
+      new_res = map (ConcatReturns SplitContiguous undefined group_size Nothing) stms_res_arrs
+  return (prestms, lvl, space, KernelBody () kstms new_res)
 
 {-
         tileInKernelStatement (kspace, extra_bnds)
@@ -612,10 +669,10 @@ varianceInStm variance bnd =
         binding_variance = mconcat $ map (look variance) $ S.toList (freeIn bnd)
 
 sufficientGroups :: MonadBinder m =>
-                    [(VName, SubExp, VName, SubExp)] -> SubExp
+                    [(SubExp, SubExp)] -> SubExp
                  -> m (SubExp, SubExp)
 sufficientGroups gspace group_size = do
-  groups_in_dims <- forM gspace $ \(_, gd, _, ld) ->
+  groups_in_dims <- forM gspace $ \(gd, ld) ->
     letSubExp "groups_in_dim" =<< eDivRoundingUp Int32 (eSubExp gd) (eSubExp ld)
   num_groups <- letSubExp "num_groups" =<<
                 foldBinOp (Mul Int32) (constant (1::Int32)) groups_in_dims
