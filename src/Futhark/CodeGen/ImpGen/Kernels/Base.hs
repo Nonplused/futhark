@@ -45,7 +45,7 @@ import Futhark.Representation.ExplicitMemory
 import qualified Futhark.CodeGen.ImpCode.Kernels as Imp
 import Futhark.CodeGen.ImpCode.Kernels (bytes)
 import Futhark.CodeGen.ImpGen
-import Futhark.Util.IntegralExp (quotRoundingUp, quot)
+import Futhark.Util.IntegralExp (IntegralExp, rem, quotRoundingUp, quot)
 import Futhark.Util (maybeNth)
 
 type CallKernelGen = ImpM ExplicitMemory Imp.HostOp
@@ -514,19 +514,18 @@ isActive limit = case actives of
   where (is, ws) = unzip limit
         actives = zipWith active is $ map (toExp' Bool) ws
         active i = (Imp.var i int32 .<.)
-{-
+
 unflattenNestedIndex :: IntegralExp num => [num] -> [num] -> num -> [(num,num)]
 unflattenNestedIndex global_dims group_dims global_id =
   zip global_is local_is
   where num_groups_dims = zipWith quotRoundingUp global_dims group_dims
         group_size = product group_dims
-        group_id = global_id `Futhark.Util.IntegralExp.quot` group_size
-        local_id = global_id `Futhark.Util.IntegralExp.rem` group_size
+        group_id = global_id `quot` group_size
+        local_id = global_id `rem` group_size
 
         group_is = unflattenIndex num_groups_dims group_id
         local_is = unflattenIndex group_dims local_id
         global_is = zipWith (+) local_is $ zipWith (*) group_is group_dims
--}
 
 -- | Change every memory block to be in the global address space,
 -- except those who are in the local memory space.  This only affects
@@ -998,7 +997,7 @@ compileGroupResult :: SegSpace
                    -> KernelConstants -> PatElem ExplicitMemory -> KernelResult
                    -> InKernelGen ()
 
-compileGroupResult _ constants pe (ConcatReturns SplitContiguous w per_group_elems moffset what) = do
+compileGroupResult _ constants pe (TileReturns [(w,per_group_elems)] what) = do
   dest_loc <- entryArrayLocation <$> lookupArray (patElemName pe)
   let dest_loc_offset = offsetArray dest_loc offset
       dest' = arrayDestination dest_loc_offset
@@ -1016,10 +1015,18 @@ compileGroupResult _ constants pe (ConcatReturns SplitContiguous w per_group_ele
            kernelGroupSize constants * Imp.vi32 i + ltid
       sWhen (j .<. n) $ copyDWIMDest dest' [j] (Var what) [j]
   where ltid = kernelLocalThreadId constants
-        offset = case moffset of
-                   Nothing -> toExp' int32 per_group_elems *
-                              kernelGroupId constants
-                   Just se -> toExp' int32 se
+        offset = toExp' int32 per_group_elems * kernelGroupId constants
+
+compileGroupResult space constants pe (TileReturns dims what) = do
+  let gids = map fst $ unSegSpace space
+      out_dims = map (toExp' int32 . fst) dims
+      out_tile_sizes = map (toExp' int32 . snd) dims
+      local_is = unflattenIndex out_tile_sizes $ kernelLocalThreadId constants
+      group_is = zipWith (*) (map Imp.vi32 gids) out_tile_sizes
+  is_for_thread <- mapM (dPrimV "thread_out_index") $ zipWith (+) group_is local_is
+
+  sWhen (isActive $ zip is_for_thread $ map fst dims) $
+    copyDWIM (patElemName pe) (map Imp.vi32 is_for_thread) (Var what) local_is
 
 compileThreadResult :: SegSpace
                     -> KernelConstants -> PatElem ExplicitMemory -> KernelResult
@@ -1029,26 +1036,21 @@ compileThreadResult space _ pe (ThreadsReturn what) = do
   let is = map (Imp.vi32 . fst) $ unSegSpace space
   copyDWIM (patElemName pe) is what []
 
-compileThreadResult _ constants pe (ConcatReturns SplitContiguous _ per_thread_elems moffset what) = do
+compileThreadResult _ constants pe (ConcatReturns SplitContiguous _ per_thread_elems what) = do
   dest_loc <- entryArrayLocation <$> lookupArray (patElemName pe)
   let dest_loc_offset = offsetArray dest_loc offset
       dest' = arrayDestination dest_loc_offset
   copyDWIMDest dest' [] (Var what) []
-  where offset = case moffset of
-                   Nothing -> toExp' int32 per_thread_elems *
-                              kernelGlobalThreadId constants
-                   Just se -> toExp' int32 se
+  where offset = toExp' int32 per_thread_elems * kernelGlobalThreadId constants
 
-compileThreadResult _ constants pe (ConcatReturns (SplitStrided stride) _ _ moffset what) = do
+compileThreadResult _ constants pe (ConcatReturns (SplitStrided stride) _ _ what) = do
   dest_loc <- entryArrayLocation <$> lookupArray (patElemName pe)
   let dest_loc' = strideArray
                   (offsetArray dest_loc offset) $
                   toExp' int32 stride
       dest' = arrayDestination dest_loc'
   copyDWIMDest dest' [] (Var what) []
-  where offset = case moffset of
-                   Nothing -> kernelGlobalThreadId constants
-                   Just se -> toExp' int32 se
+  where offset = kernelGlobalThreadId constants
 
 compileThreadResult _ constants pe (WriteReturn rws _arr dests) = do
   rws' <- mapM toExp rws

@@ -883,12 +883,11 @@ mapResultHint lvl space = hint
               t_dims <- mapM dimAllocationSize $ arrayDims t
               return $ Hint (innermost space_dims t_dims) DefaultSpace
 
-        hint t (ConcatReturns SplitStrided{} w _ _ _) = do
+        hint t (ConcatReturns SplitStrided{} w _ _) = do
           t_dims <- mapM dimAllocationSize $ arrayDims t
           return $ Hint (innermost [w] t_dims) DefaultSpace
 
-        -- TODO: Can we make hint for ConcatRetuns when it has an offset?
-        hint Prim{} (ConcatReturns SplitContiguous w elems_per_thread Nothing _) = do
+        hint Prim{} (ConcatReturns SplitContiguous w elems_per_thread _) = do
           let ixfun_base = IxFun.iota [num_threads, primExpFromSubExp int32 elems_per_thread]
               ixfun_tr = IxFun.permute ixfun_base [1,0]
               ixfun = IxFun.reshape ixfun_tr $ map (DimNew . primExpFromSubExp int32) [w]

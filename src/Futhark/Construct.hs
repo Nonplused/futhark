@@ -47,6 +47,7 @@ module Futhark.Construct
   , fullSlice
   , fullSliceNum
   , isFullSlice
+  , sliceAt
   , ifCommon
 
   , module Futhark.Binder
@@ -390,15 +391,23 @@ binLambda bop arg_t ret_t = do
            , lambdaBody       = body
            }
 
+sliceDim :: SubExp -> DimIndex SubExp
+sliceDim d = DimSlice (constant (0::Int32)) d (constant (1::Int32))
+
 -- | @fullSlice t slice@ returns @slice@, but with 'DimSlice's of
 -- entire dimensions appended to the full dimensionality of @t@.  This
 -- function is used to turn incomplete indexing complete, as required
 -- by 'Index'.
 fullSlice :: Type -> [DimIndex SubExp] -> Slice SubExp
 fullSlice t slice =
-  slice ++
-  map (\d -> DimSlice (constant (0::Int32)) d (constant (1::Int32)))
-  (drop (length slice) $ arrayDims t)
+  slice ++ map sliceDim (drop (length slice) $ arrayDims t)
+
+-- | @ sliceAt t n slice@ returns @slice@ but with 'DimSlice's of the
+-- outer @n@ dimensions prepended, and as many appended as to make it
+-- a full slice.  This is a generalisation of 'fullSlice'.
+sliceAt :: Type -> Int -> [DimIndex SubExp] -> Slice SubExp
+sliceAt t n slice =
+  fullSlice t $ map sliceDim (take n $ arrayDims t) ++ slice
 
 -- | Like 'fullSlice', but the dimensions are simply numeric.
 fullSliceNum :: Num d => [d] -> [DimIndex d] -> Slice d

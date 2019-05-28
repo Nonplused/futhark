@@ -129,20 +129,25 @@ data KernelResult = ThreadsReturn SubExp
                     SplitOrdering -- Permuted?
                     SubExp -- The final size.
                     SubExp -- Per-thread/group (max) chunk size.
-                    (Maybe SubExp) -- Optional precalculated offset.
-                    VName -- Chunk by this thread.
+                    VName -- Chunk by this worker.
+                  | TileReturns
+                    [(SubExp, SubExp)] -- Total/tile for each dimension
+                    VName -- Index of chunk by this worker.
                   deriving (Eq, Show, Ord)
 
 kernelResultSubExp :: KernelResult -> SubExp
 kernelResultSubExp (ThreadsReturn se) = se
 kernelResultSubExp (WriteReturn _ arr _) = Var arr
-kernelResultSubExp (ConcatReturns _ _ _ _ v) = Var v
+kernelResultSubExp (ConcatReturns _ _ _ v) = Var v
+kernelResultSubExp (TileReturns _ v) = Var v
 
 instance FreeIn KernelResult where
   freeIn (ThreadsReturn what) = freeIn what
   freeIn (WriteReturn rws arr res) = freeIn rws <> freeIn arr <> freeIn res
-  freeIn (ConcatReturns o w per_thread_elems moffset v) =
-    freeIn o <> freeIn w <> freeIn per_thread_elems <> freeIn moffset <> freeIn v
+  freeIn (ConcatReturns o w per_thread_elems v) =
+    freeIn o <> freeIn w <> freeIn per_thread_elems <> freeIn v
+  freeIn (TileReturns dims v) =
+    freeIn dims <> freeIn v
 
 instance Attributes lore => FreeIn (KernelBody lore) where
   freeIn (KernelBody attr stms res) =
@@ -165,13 +170,14 @@ instance Substitute KernelResult where
     WriteReturn
     (substituteNames subst rws) (substituteNames subst arr)
     (substituteNames subst res)
-  substituteNames subst (ConcatReturns o w per_thread_elems moffset v) =
+  substituteNames subst (ConcatReturns o w per_thread_elems v) =
     ConcatReturns
     (substituteNames subst o)
     (substituteNames subst w)
     (substituteNames subst per_thread_elems)
-    (substituteNames subst moffset)
     (substituteNames subst v)
+  substituteNames subst (TileReturns dims v) =
+    TileReturns (substituteNames subst dims) (substituteNames subst v)
 
 instance Attributes lore => Rename (KernelBody lore) where
   rename (KernelBody attr stms res) = do
@@ -194,7 +200,6 @@ removeKernelBodyAliases :: CanBeAliased (Op lore) =>
                            KernelBody (Aliases lore) -> KernelBody lore
 removeKernelBodyAliases (KernelBody (_, attr) stms res) =
   KernelBody attr (fmap removeStmAliases stms) res
-
 
 addKernelBodyRanges :: (Attributes lore, CanBeRanged (Op lore)) =>
                        KernelBody lore -> Range.RangeM (KernelBody (Ranges lore))
@@ -244,16 +249,22 @@ checkKernelBody ts (KernelBody (_, attr) stms kres) = do
               pretty e ++ " of type " ++ pretty t ++ ", shape=" ++ pretty rws ++
               ", but destination array has type " ++ pretty arr_t
           TC.consume =<< TC.lookupAliases arr
-        checkKernelResult (ConcatReturns o w per_thread_elems moffset v) t = do
+        checkKernelResult (ConcatReturns o w per_thread_elems v) t = do
           case o of
             SplitContiguous     -> return ()
             SplitStrided stride -> TC.require [Prim int32] stride
           TC.require [Prim int32] w
           TC.require [Prim int32] per_thread_elems
-          mapM_ (TC.require [Prim int32]) moffset
           vt <- lookupType v
           unless (vt == t `arrayOfRow` arraySize 0 vt) $
             TC.bad $ TC.TypeError $ "Invalid type for ConcatReturns " ++ pretty v
+        checkKernelResult (TileReturns dims v) t = do
+          forM_ dims $ \(dim, tile) -> do
+            TC.require [Prim int32] dim
+            TC.require [Prim int32] tile
+          vt <- lookupType v
+          unless (vt == t `arrayOfShape` Shape (map snd dims)) $
+            TC.bad $ TC.TypeError $ "Invalid type for TileReturns " ++ pretty v
 
 kernelBodyMetrics :: OpMetrics (Op lore) => KernelBody lore -> MetricsM ()
 kernelBodyMetrics = mapM_ bindingMetrics . kernelBodyStms
@@ -271,14 +282,15 @@ instance Pretty KernelResult where
     where ppRes (is, e) =
             PP.brackets (PP.commasep $ zipWith f is rws) <+> text "<-" <+> ppr e
           f i rw = ppr i <+> text "<" <+> ppr rw
-  ppr (ConcatReturns o w per_thread_elems offset v) =
+  ppr (ConcatReturns o w per_thread_elems v) =
     text "concat" <> suff <>
-    parens (commasep [ppr w, ppr per_thread_elems] <> offset_text) <+>
-    ppr v
+    parens (commasep [ppr w, ppr per_thread_elems]) <+> ppr v
     where suff = case o of SplitContiguous     -> mempty
                            SplitStrided stride -> text "Strided" <> parens (ppr stride)
-          offset_text = case offset of Nothing -> ""
-                                       Just se -> "," <+> "offset=" <> ppr se
+  ppr (TileReturns dims v) =
+    text "tile" <>
+    parens (commasep $ map onDim dims) <+> ppr v
+    where onDim (dim, tile) = ppr dim <+> text "/" <+> ppr tile
 
 --- Segmented operations
 
@@ -342,8 +354,10 @@ segResultShape _ t (WriteReturn rws _ _) =
   t `arrayOfShape` Shape rws
 segResultShape space t (ThreadsReturn _) =
   foldr (flip arrayOfRow) t $ segSpaceDims space
-segResultShape _ t (ConcatReturns _ w _ _ _) =
+segResultShape _ t (ConcatReturns _ w _ _) =
   t `arrayOfRow` w
+segResultShape _ t (TileReturns dims _) =
+  t `arrayOfShape` Shape (map fst dims)
 
 segOpType :: SegOp lore -> [Type]
 segOpType (SegMap _ space ts kbody) =

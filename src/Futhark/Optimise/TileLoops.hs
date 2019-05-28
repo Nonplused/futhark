@@ -21,7 +21,6 @@ import Futhark.Transform.Substitute
 import Futhark.Pass
 import Futhark.Tools
 import Futhark.Optimise.TileLoops.RegTiling3D
-import Futhark.Util.IntegralExp
 
 tileLoops :: Pass Kernels Kernels
 tileLoops = Pass "tile loops" "Tile stream loops inside kernels" $
@@ -46,7 +45,7 @@ optimiseStm stm@(Let pat aux (Op (SegOp (SegMap lvl@SegThread{} space ts kbody))
   case res3dtiling of
     Just (extra_bnds, stmt') -> return $ extra_bnds <> oneStm stmt'
     Nothing -> do
-      (extra_stms, lvl', space', kbody') <- tileInKernelBody mempty initial_variance lvl space ts kbody
+      (extra_stms, (lvl', space', kbody')) <- tileInKernelBody mempty initial_variance lvl space ts kbody
       return $ extra_stms <>
         oneStm (Let pat aux $ Op $ SegOp $ SegMap lvl' space' ts kbody')
   where initial_variance = M.map mempty $ scopeOfSegSpace space
@@ -57,73 +56,74 @@ optimiseStm (Let pat aux e) =
 
 tileInKernelBody :: Names -> VarianceTable
                  -> SegLevel -> SegSpace -> [Type] -> KernelBody Kernels
-                 -> TileM (Stms Kernels, SegLevel, SegSpace, KernelBody Kernels)
+                 -> TileM (Stms Kernels, (SegLevel, SegSpace, KernelBody Kernels))
 tileInKernelBody branch_variant initial_variance lvl initial_kspace ts (KernelBody () kstms kres)
   | Just res <- mapM isSimpleResult kres = do
-      (extra_stms, lvl', kspace', kbody) <-
+      (extra_stms, tiled) <-
         tileInBody branch_variant initial_variance lvl initial_kspace ts $
         Body () kstms res
-      return (extra_stms, lvl', kspace', kbody)
+      return (extra_stms, tiled)
   | otherwise =
-      return (mempty, lvl, initial_kspace, KernelBody () kstms kres)
+      return (mempty, (lvl, initial_kspace, KernelBody () kstms kres))
   where isSimpleResult (ThreadsReturn se) = Just se
         isSimpleResult _ = Nothing
 
 tileInBody :: Names -> VarianceTable
            -> SegLevel -> SegSpace -> [Type] -> Body Kernels
-           -> TileM (Stms Kernels, SegLevel, SegSpace, KernelBody Kernels)
-tileInBody branch_variant initial_variance lvl initial_kspace ts body = do
-  (extra_stms, lvl', kspace', body') <-
-    tileInStms branch_variant initial_variance lvl initial_kspace ts body
-  return (extra_stms, lvl', kspace', body')
-
-tileInStms :: Names -> VarianceTable
-           -> SegLevel -> SegSpace -> [Type] -> Body Kernels
-           -> TileM (Stms Kernels, SegLevel, SegSpace, KernelBody Kernels)
-tileInStms branch_variant initial_variance initial_lvl initial_space res_ts (Body () initial_kstms stms_res) =
+           -> TileM (Stms Kernels, (SegLevel, SegSpace, KernelBody Kernels))
+tileInBody branch_variant initial_variance initial_lvl initial_space res_ts (Body () initial_kstms stms_res) =
   descend mempty $ stmsToList initial_kstms
   where
     variance = varianceInStms initial_variance initial_kstms
 
     descend prestms [] =
-      return (mempty, initial_lvl, initial_space, KernelBody () prestms $ map ThreadsReturn stms_res)
+      return (mempty, (initial_lvl, initial_space, KernelBody () prestms $ map ThreadsReturn stms_res))
     descend prestms (stm:poststms)
       -- 1D tiling of redomap.
       | [dim] <- unSegSpace initial_space,
-        Just (w, arrs, form) <- tileable variance stm =
+        Just (w, arrs, form) <- tileable stm,
+        all (S.null . flip (M.findWithDefault mempty) variance) arrs =
           tile1D initial_lvl prestms res_ts (stmPattern stm)
           dim w form arrs poststms stms_res
 
-      -- 1D tiling of redomap.
+      -- 2D tiling of redomap.
       | [dim_x, dim_y] <- unSegSpace initial_space,
-        Just (w, arrs, form) <- tileable variance stm =
+        Just (w, arrs, form) <- tileable stm,
+        Just inner_perm <- mapM (invariantToOneOfTwoInnerDims branch_variant variance [dim_x, dim_y]) arrs =
           tile2D initial_lvl prestms res_ts (stmPattern stm)
-          dim_x dim_y  w form arrs poststms stms_res
+          dim_x dim_y w form (zip arrs inner_perm) poststms stms_res
 
       | otherwise =
           localScope (scopeOf stm) $
           descend (prestms <> oneStm stm) poststms
-
-tileable :: VarianceTable -> Stm Kernels
-         -> Maybe (SubExp, [VName],
-                   (Commutativity, Lambda Kernels, [SubExp], Lambda Kernels))
-tileable variance stm
-  | Op (OtherOp (Screma w form arrs)) <- stmExp stm,
-    Just (red_comm, red_lam, red_nes, map_lam) <- isRedomapSOAC form,
-    not $ null arrs,
-    all (S.null . flip (M.findWithDefault mempty) variance) arrs,
-    all primType $ lambdaReturnType map_lam,
-    all (primType . paramType) $ lambdaParams map_lam =
-      Just (w, arrs, (red_comm, red_lam, red_nes, map_lam))
-  | otherwise =
-      Nothing
 
 liveSet :: FreeIn a => Stms Kernels -> a -> Names
 liveSet stms after =
   S.fromList (concatMap (patternNames . stmPattern) stms) `S.intersection`
   freeIn after
 
+tileable :: Stm Kernels
+         -> Maybe (SubExp, [VName],
+                   (Commutativity, Lambda Kernels, [SubExp], Lambda Kernels))
+tileable stm
+  | Op (OtherOp (Screma w form arrs)) <- stmExp stm,
+    Just (red_comm, red_lam, red_nes, map_lam) <- isRedomapSOAC form,
+    not $ null arrs,
+    all primType $ lambdaReturnType map_lam,
+    all (primType . paramType) $ lambdaParams map_lam =
+      Just (w, arrs, (red_comm, red_lam, red_nes, map_lam))
+  | otherwise =
+      Nothing
+
 data TileKind = TilePartial | TileFull
+
+mkReadPreludeValues :: MonadBinder m =>
+                       [VName] -> [VName] -> [VName] -> m (M.Map VName VName)
+mkReadPreludeValues prestms_live_arrs prestms_live ltids =
+  fmap mconcat $ forM (zip prestms_live_arrs prestms_live) $ \(arr, v) -> do
+  arr_t <- lookupType arr
+  M.singleton v <$> letExp (baseString v)
+    (BasicOp $ Index arr $ fullSlice arr_t $ map (DimFix . Var) ltids)
 
 segMap1D :: String
          -> SegLevel
@@ -177,7 +177,7 @@ processTile1D :: (VName -> Binder Kernels Substitutions)
               -> [VName] -> [VName]
               -> Binder Kernels [VName]
 processTile1D
-  readPreludeValues gid gtid w
+  readPreludeValues gid gtid kdim
   red_comm red_lam map_lam num_groups group_size tile accs = do
 
   tile_size <- arraysSize 0 <$> mapM lookupType tile
@@ -191,28 +191,28 @@ processTile1D
 
     substs <- readPreludeValues ltid
 
-    -- We replace the neutral elements with the
-    -- accumulators (this is OK because the parallel
-    -- semantics are not used after this point).
+    -- We replace the neutral elements with the accumulators (this is
+    -- OK because the parallel semantics are not used after this
+    -- point).
     thread_accs <- forM accs $ \acc ->
       letSubExp "acc" $ BasicOp $ Index acc [DimFix $ Var ltid]
     let form' = redomapSOAC red_comm red_lam thread_accs map_lam
 
     fmap (map Var) $
-      letTupExp "acc" =<< eIf (toExp $ LeafExp gtid' int32 .<. primExpFromSubExp int32 w)
+      letTupExp "acc" =<< eIf (toExp $ LeafExp gtid' int32 .<. primExpFromSubExp int32 kdim)
       (eBody [pure $ substituteNames (M.insert gtid gtid' substs) $
               Op $ OtherOp $ Screma tile_size form' tile])
       (resultBodyM thread_accs)
 
 processResidualTile1D :: (MonadBinder m, Lore m ~ Kernels) =>
                          Count NumGroups SubExp -> Count GroupSize SubExp
-                      -> VName -> VName
+                      -> VName -> VName -> SubExp
                       -> Commutativity -> Lambda Kernels -> Lambda Kernels
                       -> (VName -> Binder Kernels Substitutions)
                       -> SubExp -> SubExp -> [VName] -> SubExp -> [VName]
                       -> m [VName]
 processResidualTile1D
-  num_groups group_size gid gtid red_comm red_lam map_lam
+  num_groups group_size gid gtid kdim red_comm red_lam map_lam
   readPreludeValues num_whole_tiles tile_size accs w arrs = do
   -- The number of residual elements that are not covered by
   -- the whole tiles.
@@ -237,14 +237,14 @@ processResidualTile1D
       -- Now each thread performs a traversal of the tile and
       -- updates its accumulator.
       resultBody . map Var <$> processTile1D
-        readPreludeValues gid gtid w
+        readPreludeValues gid gtid kdim
         red_comm red_lam map_lam num_groups group_size tile accs
 
 tile1D :: SegLevel -> Stms Kernels -> [Type] -> Pattern Kernels
        -> (VName, SubExp)
        -> SubExp -> (Commutativity, Lambda Kernels, [SubExp], Lambda Kernels) -> [VName]
        -> [Stm Kernels] -> [SubExp]
-       -> TileM (Stms Kernels, SegLevel, SegSpace, KernelBody Kernels)
+       -> TileM (Stms Kernels, (SegLevel, SegSpace, KernelBody Kernels))
 tile1D initial_lvl prestms res_ts pat (gtid, kdim) w form arrs poststms poststms_res = do
   -- Figure out which of values produced by the prelude
   -- statements are still alive.
@@ -277,10 +277,7 @@ tile1D initial_lvl prestms res_ts pat (gtid, kdim) w form arrs poststms poststms
 
     -- Make the per-thread prelude results available.
     let readPreludeValues ltid =
-          fmap mconcat $ forM (zip prestms_live_arrs prestms_live) $ \(arr, v) -> do
-          arr_t <- lookupType arr
-          M.singleton v <$> letExp (baseString v)
-            (BasicOp $ Index arr $ fullSlice arr_t [DimFix $ Var ltid])
+          mkReadPreludeValues prestms_live_arrs prestms_live [ltid]
 
     merge <- forM (zip (lambdaParams red_lam) mergeinits) $ \(p, mergeinit) ->
       (,) <$>
@@ -306,7 +303,7 @@ tile1D initial_lvl prestms res_ts pat (gtid, kdim) w form arrs poststms poststms
       -- Now each thread performs a traversal of the tile and
       -- updates its accumulator.
       resultBody . map Var <$>
-        processTile1D readPreludeValues gid gtid w
+        processTile1D readPreludeValues gid gtid kdim
         red_comm red_lam map_lam
         (segNumGroups initial_lvl) (segGroupSize initial_lvl) tile
         (map (paramName . fst) merge)
@@ -317,7 +314,7 @@ tile1D initial_lvl prestms res_ts pat (gtid, kdim) w form arrs poststms poststms
     red_lam' <- renameLambda red_lam
     map_lam' <- renameLambda map_lam
     accs' <- processResidualTile1D (segNumGroups initial_lvl) (segGroupSize initial_lvl)
-             gid gtid red_comm red_lam' map_lam' readPreludeValues
+             gid gtid kdim red_comm red_lam' map_lam' readPreludeValues
              num_whole_tiles tile_size accs w arrs
 
     -- Create a SegMap that takes care of the postlude for every thread.
@@ -343,47 +340,302 @@ tile1D initial_lvl prestms res_ts pat (gtid, kdim) w form arrs poststms poststms
   gid_flat <- newVName "gid_flat"
   let lvl = SegGroup (segNumGroups initial_lvl) (segGroupSize initial_lvl)
       space = SegSpace gid_flat [(gid, unCount $ segNumGroups lvl)]
-      new_res = map (ConcatReturns SplitContiguous kdim group_size Nothing) stms_res_arrs
-  return (mempty, lvl, space, KernelBody () kstms new_res)
+      new_res = map (TileReturns [(kdim, group_size)]) stms_res_arrs
+  return (mempty, (lvl, space, KernelBody () kstms new_res))
+
+invariantToOneOfTwoInnerDims :: Names -> M.Map VName Names -> [(VName, SubExp)] -> VName
+                             -> Maybe [Int]
+invariantToOneOfTwoInnerDims branch_variant variance dims arr = do
+  (j,_) : (i,_) : _ <- Just $ reverse dims
+  let variant_to = M.findWithDefault mempty arr variance
+      branch_invariant = not $ S.member j branch_variant || S.member i branch_variant
+  if branch_invariant && i `S.member` variant_to && not (j `S.member` variant_to) then
+    Just [0,1]
+  else if branch_invariant && j `S.member` variant_to && not (i `S.member` variant_to) then
+    Just [1,0]
+  else
+    Nothing
+
+segMap2D :: String
+         -> SegLevel -> SubExp -> SubExp
+         -> (VName -> VName -> Binder Kernels [SubExp])
+         -> Binder Kernels [VName]
+segMap2D desc lvl dim_x dim_y f = do
+  ltid_x <- newVName "ltid_x"
+  ltid_y <- newVName "ltid_y"
+  ltid_flat <- newVName "ltid_flat"
+  let space = SegSpace ltid_flat [(ltid_x, dim_x), (ltid_y, dim_y)]
+
+  ((ts, res), stms) <- runBinder $ do
+    res <- f ltid_x ltid_y
+    ts <- mapM subExpType res
+    return (ts, res)
+
+  letTupExp desc $ Op $ SegOp $
+    SegMap lvl space ts $ KernelBody () stms $ map ThreadsReturn res
+
+readTile2D :: TileKind
+           -> SubExp -> SubExp
+           -> Count NumGroups SubExp -> Count GroupSize SubExp
+           -> (VName -> VName -> Binder Kernels [(VName, [Int])])
+           -> Binder Kernels [VName]
+readTile2D kind tile_id tile_size num_groups group_size get_arrs =
+  segMap2D "full_tile" (SegThread num_groups group_size) tile_size tile_size $ \ltid_x ltid_y -> do
+    (arrs, perms) <- unzip <$> get_arrs ltid_x ltid_y
+    arr_ts <- mapM lookupType arrs
+    let tile_ts = map rowType arr_ts
+        w = arraysSize 0 arr_ts
+
+    i <- letSubExp "i" =<<
+         toExp (primExpFromSubExp int32 tile_id *
+                primExpFromSubExp int32 tile_size +
+                LeafExp ltid_x int32)
+    j <- letSubExp "j" =<<
+         toExp (primExpFromSubExp int32 tile_id *
+                primExpFromSubExp int32 tile_size +
+                LeafExp ltid_y int32)
+    let readTileElem arr perm =
+          -- No need for fullSlice because we are tiling only prims.
+          letExp "tile_elem" $ BasicOp $ Index arr
+          [DimFix $ last $ rearrangeShape perm [i,j]]
+    fmap (map Var) $
+      case kind of
+        TilePartial ->
+          letTupExp "pre" =<< eIf (toExp $
+                                   primExpFromSubExp int32 i .<. primExpFromSubExp int32 w .&&.
+                                   primExpFromSubExp int32 j .<. primExpFromSubExp int32 w)
+          (resultBody . map Var <$> zipWithM readTileElem arrs perms)
+          (eBody $ map eBlank tile_ts)
+        TileFull ->
+          zipWithM readTileElem arrs perms
+
+processTile2D :: (VName -> VName -> Binder Kernels Substitutions)
+              -> VName -> VName -> VName -> VName -> SubExp -> SubExp -> SubExp
+              -> Commutativity -> Lambda Kernels -> Lambda Kernels
+              -> Count NumGroups SubExp -> Count GroupSize SubExp
+              -> [(VName,[Int])] -> [VName]
+              -> Binder Kernels [VName]
+processTile2D
+  readPreludeValues gid_x gid_y gtid_x gtid_y kdim_x kdim_y tile_size
+  red_comm red_lam map_lam num_groups group_size tiles_and_perms accs = do
+
+  -- Might be truncated in case of a partial tile.
+  actual_tile_size <- arraysSize 0 <$> mapM (lookupType . fst) tiles_and_perms
+
+  segMap2D "acc" (SegThreadScalar num_groups group_size) tile_size tile_size $ \ltid_x ltid_y -> do
+    -- Reconstruct the original gtids from gid_x/gid_y and ltid_x/ltid_y.
+    gtid_x' <- letExp "gtid_x" =<<
+               toExp (LeafExp gid_x int32 * primExpFromSubExp int32 tile_size +
+                      LeafExp ltid_x int32)
+    gtid_y' <- letExp "gtid_y" =<<
+               toExp (LeafExp gid_y int32 * primExpFromSubExp int32 tile_size +
+                      LeafExp ltid_y int32)
+    let gtid_substs = M.fromList [(gtid_x, gtid_x'), (gtid_y, gtid_y')]
+
+    substs <- readPreludeValues ltid_x ltid_y
+
+    -- We replace the neutral elements with the accumulators (this is
+    -- OK because the parallel semantics are not used after this
+    -- point).
+    thread_accs <- forM accs $ \acc ->
+      letSubExp "acc" $ BasicOp $ Index acc [DimFix $ Var ltid_x, DimFix $ Var ltid_y]
+    let form' = redomapSOAC red_comm red_lam thread_accs map_lam
+
+    tiles' <- forM tiles_and_perms $ \(tile, perm) -> do
+      tile_t <- lookupType tile
+      letExp "tile" $ BasicOp $ Index tile $ sliceAt tile_t (head perm)
+        [DimFix $ Var $ head $ rearrangeShape perm [ltid_x, ltid_y]]
+
+    fmap (map Var) $
+      letTupExp "acc" =<< eIf (toExp $
+                               LeafExp gtid_x' int32 .<. primExpFromSubExp int32 kdim_x .&&.
+                               LeafExp gtid_y' int32 .<. primExpFromSubExp int32 kdim_y)
+      (eBody [pure $ substituteNames (gtid_substs <> substs) $
+              Op $ OtherOp $ Screma actual_tile_size form' tiles'])
+      (resultBodyM thread_accs)
+
+processResidualTile2D :: (MonadBinder m, Lore m ~ Kernels) =>
+                         Stms Kernels
+                      -> Count NumGroups SubExp -> Count GroupSize SubExp
+                      -> VName -> VName -> VName -> VName -> SubExp -> SubExp
+                      -> Commutativity -> Lambda Kernels -> Lambda Kernels
+                      -> (VName -> VName -> Binder Kernels Substitutions)
+                      -> SubExp -> SubExp -> [VName] -> SubExp -> [(VName, [Int])]
+                      -> m [VName]
+processResidualTile2D
+  prestms num_groups group_size gid_x gid_y gtid_x gtid_y kdim_x kdim_y red_comm red_lam map_lam
+  readPreludeValues num_whole_tiles tile_size accs w arrs_and_perms = do
+  -- The number of residual elements that are not covered by
+  -- the whole tiles.
+  residual_input <- letSubExp "residual_input" $
+    BasicOp $ BinOp (SRem Int32) w tile_size
+
+  letTupExp "acc_after_residual" =<<
+    eIf (toExp $ primExpFromSubExp int32 residual_input .==. 0)
+    (resultBodyM $ map Var accs)
+    (nonemptyTile residual_input)
+
+  where
+    nonemptyTile residual_input = renameBody <=< runBodyBinder $ do
+      -- Collectively construct a tile.  Threads that are out-of-bounds
+      -- provide a blank dummy value.
+      full_tile <- readTile2D TilePartial num_whole_tiles tile_size num_groups group_size $ \ltid_x ltid_y -> do
+          -- Reconstruct the original gtids from gid_x/gid_y and ltid_x/ltid_y.
+          gtid_x' <- letExp "gtid_x" =<<
+                     toExp (LeafExp gid_x int32 * primExpFromSubExp int32 tile_size +
+                            LeafExp ltid_x int32)
+          gtid_y' <- letExp "gtid_y" =<<
+                     toExp (LeafExp gid_y int32 * primExpFromSubExp int32 tile_size +
+                            LeafExp ltid_y int32)
+          let gtid_substs = M.fromList [(gtid_x, gtid_x'), (gtid_y, gtid_y')]
+          addStms $ substituteNames gtid_substs prestms
+          return arrs_and_perms
+
+      tile <- forM full_tile $ \tile ->
+        letExp "partial_tile" $ BasicOp $ Index tile
+        [DimSlice (intConst Int32 0) residual_input (intConst Int32 1),
+         DimSlice (intConst Int32 0) residual_input (intConst Int32 1)]
+
+      -- Now each thread performs a traversal of the tile and
+      -- updates its accumulator.
+      resultBody . map Var <$>
+        processTile2D readPreludeValues gid_x gid_y gtid_x gtid_y kdim_x kdim_y tile_size
+        red_comm red_lam map_lam
+        num_groups group_size
+        (zip tile (map snd arrs_and_perms)) accs
 
 tile2D :: SegLevel -> Stms Kernels -> [Type] -> Pattern Kernels
        -> (VName, SubExp) -> (VName, SubExp)
-       -> SubExp -> (Commutativity, Lambda Kernels, [SubExp], Lambda Kernels) -> [VName]
-       -> [Stm Kernels] -> [SubExp]
-       -> TileM (Stms Kernels, SegLevel, SegSpace, KernelBody Kernels)
-tile2D initial_lvl prestms res_ts pat (gtid_x, kdim_x) (gtid_y, kdim_y) w form arrs poststms poststms_res = do
+       -> SubExp -> (Commutativity, Lambda Kernels, [SubExp], Lambda Kernels)
+       -> [(VName, [Int])] -> [Stm Kernels] -> [SubExp]
+       -> TileM (Stms Kernels, (SegLevel, SegSpace, KernelBody Kernels))
+tile2D initial_lvl prestms res_ts pat (gtid_x, kdim_x) (gtid_y, kdim_y) w form arrs_and_perms poststms poststms_res = do
   -- Figure out which of values produced by the prelude
   -- statements are still alive.
   let prestms_live =
-        S.toList $
-        S.fromList (concatMap (patternNames . stmPattern) $
-                     stmsToList prestms) `S.intersection`
-        (freeIn poststms <> freeIn w <>
-         freeIn red_lam <> freeIn red_nes <> freeIn map_lam)
+        S.toList $ liveSet prestms $
+        freeIn poststms <> freeIn w <>
+        freeIn red_lam <> freeIn red_nes <> freeIn map_lam
       (red_comm, red_lam, red_nes, map_lam) = form
-      group_size = unCount $ segGroupSize initial_lvl
       red_ts = lambdaReturnType red_lam
 
   gid_x <- newVName "gid_x"
   gid_y <- newVName "gid_y"
 
-  ((tile_size, num_threads, num_groups), prestms) <- runBinder $ do
-    tile_size_key <-
-      nameFromString . pretty <$> newVName "tile_size"
+  fmap (uncurry $ flip (,)) $ runBinder $ do
+    tile_size_key <- nameFromString . pretty <$> newVName "tile_size"
     tile_size <- letSubExp "tile_size" $ Op $ GetSize tile_size_key SizeTile
+    group_size <- letSubExp "group_size" $ BasicOp $ BinOp (Mul Int32) tile_size tile_size
 
-    (num_threads, num_groups) <-
-      sufficientGroups [(kdim_x, tile_size), (kdim_y, tile_size)] group_size
-    return (tile_size, num_threads, num_groups)
+    (num_groups, groups_per_dim) <-
+      sufficientGroups [(kdim_x, tile_size), (kdim_y, tile_size)]
 
-  let kstms = mempty
-      stms_res_arrs = mempty
+    (stms_res_arrs, kstms) <- runBinder $ do
 
-  gid_flat <- newVName "gid_flat"
-  let lvl = SegGroup (segNumGroups initial_lvl) (segGroupSize initial_lvl)
-      space = SegSpace gid_flat [(gid_x, unCount $ segNumGroups lvl)]
-      new_res = map (ConcatReturns SplitContiguous undefined group_size Nothing) stms_res_arrs
-  return (prestms, lvl, space, KernelBody () kstms new_res)
+      -- Create a SegMap that takes care of the prelude for every thread.
+      let prelude_lvl = SegThreadScalar (segNumGroups initial_lvl) (segGroupSize initial_lvl)
+      (prestms_live_arrs, mergeinits) <- fmap (splitAt (length prestms_live)) $
+                                         segMap2D "prelude" prelude_lvl tile_size tile_size
+                                         $ \ltid_x ltid_y -> do
+        -- Reconstruct the original gtids from gid_x/gid_y and ltid_x/ltid_y.
+        gtid_x' <- letExp "gtid_x" =<<
+                   toExp (LeafExp gid_x int32 * primExpFromSubExp int32 tile_size +
+                          LeafExp ltid_x int32)
+        gtid_y' <- letExp "gtid_y" =<<
+                   toExp (LeafExp gid_y int32 * primExpFromSubExp int32 tile_size +
+                          LeafExp ltid_y int32)
+        let gtid_substs = M.fromList [(gtid_x, gtid_x'), (gtid_y, gtid_y')]
+        ts <- mapM lookupType prestms_live
+        fmap (map Var) $ letTupExp "pre" =<<
+          eIf (toExp $
+               LeafExp gtid_x' int32 .<. primExpFromSubExp int32 kdim_x .&&.
+               LeafExp gtid_y' int32 .<. primExpFromSubExp int32 kdim_y)
+          (do addStms $ substituteNames gtid_substs prestms
+              resultBodyM $ map Var prestms_live ++ red_nes)
+          (eBody $ map eBlank $ ts ++ red_ts)
+
+      -- Make the per-thread prelude results available.
+      let readPreludeValues ltid_x ltid_y =
+            mkReadPreludeValues prestms_live_arrs prestms_live [ltid_x, ltid_y]
+
+      merge <- forM (zip (lambdaParams red_lam) mergeinits) $ \(p, mergeinit) ->
+        (,) <$>
+        newParam (baseString (paramName p) ++ "_merge")
+        (paramType p `arrayOfShape` Shape [tile_size, tile_size] `toDecl` Unique) <*>
+        pure (Var mergeinit)
+
+      -- Number of whole tiles that fit in the input.
+      num_whole_tiles <- letSubExp "num_whole_tiles" $
+        BasicOp $ BinOp (SQuot Int32) w tile_size
+
+      tile_id <- newVName "tile_id"
+      let loopform = ForLoop tile_id Int32 num_whole_tiles []
+      loopbody <- renameBody <=< runBodyBinder $ inScopeOf loopform $
+                  localScope (scopeOfFParams $ map fst merge) $ do
+
+        -- Collectively read a tile.
+        tile <- readTile2D TileFull (Var tile_id) tile_size
+                (segNumGroups initial_lvl) (segGroupSize initial_lvl) $ \ltid_x ltid_y -> do
+          -- Reconstruct the original gtids from gid_x/gid_y and ltid_x/ltid_y.
+          gtid_x' <- letExp "gtid_x" =<<
+                     toExp (LeafExp gid_x int32 * primExpFromSubExp int32 tile_size +
+                            LeafExp ltid_x int32)
+          gtid_y' <- letExp "gtid_y" =<<
+                     toExp (LeafExp gid_y int32 * primExpFromSubExp int32 tile_size +
+                            LeafExp ltid_y int32)
+          let gtid_substs = M.fromList [(gtid_x, gtid_x'), (gtid_y, gtid_y')]
+          addStms $ substituteNames gtid_substs prestms
+          return arrs_and_perms
+
+        -- Now each thread performs a traversal of the tile and
+        -- updates its accumulator.
+        resultBody . map Var <$>
+          processTile2D readPreludeValues gid_x gid_y gtid_x gtid_y kdim_x kdim_y tile_size
+          red_comm red_lam map_lam
+          (segNumGroups initial_lvl) (segGroupSize initial_lvl)
+          (zip tile (map snd arrs_and_perms)) (map (paramName . fst) merge)
+
+      accs <- letTupExp "accs" $ DoLoop [] merge loopform loopbody
+
+      -- We possibly have to traverse a residual tile.
+      red_lam' <- renameLambda red_lam
+      map_lam' <- renameLambda map_lam
+      accs' <- processResidualTile2D prestms (segNumGroups initial_lvl) (segGroupSize initial_lvl)
+               gid_x gid_y gtid_x gtid_y kdim_x kdim_y red_comm red_lam' map_lam' readPreludeValues
+               num_whole_tiles tile_size accs w arrs_and_perms
+
+      -- Create a SegMap that takes care of the postlude for every thread.
+      let postlude_lvl = SegThreadScalar (segNumGroups initial_lvl) (segGroupSize initial_lvl)
+      segMap2D "thread_res" postlude_lvl tile_size tile_size $ \ltid_x ltid_y -> do
+        -- Read our per-thread result from the tiled loop.
+        forM_ (zip (patternNames pat) accs') $ \(us, everyone) ->
+          letBindNames_ [us] $ BasicOp $ Index everyone
+          [DimFix $ Var ltid_x, DimFix $ Var ltid_y]
+
+        -- Reconstruct the original gtids from gid_x/gid_y and ltid_x/ltid_y.
+        gtid_x' <- letExp "gtid_x" =<<
+                   toExp (LeafExp gid_x int32 * primExpFromSubExp int32 tile_size +
+                          LeafExp ltid_x int32)
+        gtid_y' <- letExp "gtid_y" =<<
+                   toExp (LeafExp gid_y int32 * primExpFromSubExp int32 tile_size +
+                          LeafExp ltid_y int32)
+        let gtid_substs = M.fromList [(gtid_x, gtid_x'), (gtid_y, gtid_y')]
+
+        substs <- readPreludeValues ltid_x ltid_y
+
+        fmap (map Var) $ letTupExp "pre" =<<
+          eIf (toExp $
+               LeafExp gtid_x' int32 .<. primExpFromSubExp int32 kdim_x .&&.
+               LeafExp gtid_y' int32 .<. primExpFromSubExp int32 kdim_y)
+          (do addStms $ stmsFromList $ substituteNames (gtid_substs <> substs) poststms
+              resultBodyM poststms_res)
+          (eBody $ map eBlank res_ts)
+
+    gid_flat <- newVName "gid_flat"
+    let lvl = SegGroup (Count num_groups) (Count group_size)
+        space = SegSpace gid_flat $ zip [gid_x, gid_y] groups_per_dim
+        new_res = map (TileReturns [(kdim_x, tile_size), (kdim_y, tile_size)]) stms_res_arrs
+    return (lvl, space, KernelBody () kstms new_res)
 
 {-
         tileInKernelStatement (kspace, extra_bnds)
@@ -669,13 +921,10 @@ varianceInStm variance bnd =
         binding_variance = mconcat $ map (look variance) $ S.toList (freeIn bnd)
 
 sufficientGroups :: MonadBinder m =>
-                    [(SubExp, SubExp)] -> SubExp
-                 -> m (SubExp, SubExp)
-sufficientGroups gspace group_size = do
+                    [(SubExp, SubExp)] -> m (SubExp, [SubExp])
+sufficientGroups gspace = do
   groups_in_dims <- forM gspace $ \(gd, ld) ->
     letSubExp "groups_in_dim" =<< eDivRoundingUp Int32 (eSubExp gd) (eSubExp ld)
   num_groups <- letSubExp "num_groups" =<<
                 foldBinOp (Mul Int32) (constant (1::Int32)) groups_in_dims
-  num_threads <- letSubExp "num_threads" $
-                 BasicOp $ BinOp (Mul Int32) num_groups group_size
-  return (num_threads, num_groups)
+  return (num_groups, groups_in_dims)

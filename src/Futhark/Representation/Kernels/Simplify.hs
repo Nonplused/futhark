@@ -184,13 +184,14 @@ instance Engine.Simplifiable KernelResult where
     ThreadsReturn <$> Engine.simplify what
   simplify (WriteReturn ws a res) =
     WriteReturn <$> Engine.simplify ws <*> Engine.simplify a <*> Engine.simplify res
-  simplify (ConcatReturns o w pte moffset what) =
+  simplify (ConcatReturns o w pte what) =
     ConcatReturns
     <$> Engine.simplify o
     <*> Engine.simplify w
     <*> Engine.simplify pte
-    <*> Engine.simplify moffset
     <*> Engine.simplify what
+  simplify (TileReturns dims what) =
+    TileReturns <$> Engine.simplify dims <*> Engine.simplify what
 
 instance BinderOps (Wise Kernels) where
   mkExpAttrB = bindableMkExpAttrB

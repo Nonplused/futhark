@@ -186,7 +186,7 @@ prepareStream size ispace w comm fold_lam nes arrs = do
     (chunk_red_pes, chunk_map_pes) <-
       blockedPerThread gtid w size ordering fold_lam' (length nes) arrs
     let concatReturns pe =
-          ConcatReturns split_ordering w elems_per_thread_32 Nothing $ patElemName pe
+          ConcatReturns split_ordering w elems_per_thread_32 $ patElemName pe
     return (map (ThreadsReturn . Var . patElemName) chunk_red_pes ++
             map concatReturns chunk_map_pes)
 
