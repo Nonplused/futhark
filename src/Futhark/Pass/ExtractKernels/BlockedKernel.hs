@@ -22,7 +22,6 @@ module Futhark.Pass.ExtractKernels.BlockedKernel
        where
 
 import Control.Monad
-import Data.Maybe
 import Data.List
 
 import Prelude hiding (quot)

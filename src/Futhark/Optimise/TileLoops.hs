@@ -375,17 +375,12 @@ segMap2D desc lvl dim_x dim_y f = do
     SegMap lvl space ts $ KernelBody () stms $ map ThreadsReturn res
 
 readTile2D :: TileKind
-           -> SubExp -> SubExp
+           -> SubExp -> SubExp -> SubExp -> SubExp
            -> Count NumGroups SubExp -> Count GroupSize SubExp
-           -> (VName -> VName -> Binder Kernels [(VName, [Int])])
+           -> (VName -> VName -> Binder Kernels ((VName, VName), [(VName, [Int])]))
            -> Binder Kernels [VName]
-readTile2D kind tile_id tile_size num_groups group_size get_arrs =
+readTile2D kind kdim_x kdim_y tile_id tile_size num_groups group_size get_arrs =
   segMap2D "full_tile" (SegThread num_groups group_size) tile_size tile_size $ \ltid_x ltid_y -> do
-    (arrs, perms) <- unzip <$> get_arrs ltid_x ltid_y
-    arr_ts <- mapM lookupType arrs
-    let tile_ts = map rowType arr_ts
-        w = arraysSize 0 arr_ts
-
     i <- letSubExp "i" =<<
          toExp (primExpFromSubExp int32 tile_id *
                 primExpFromSubExp int32 tile_size +
@@ -394,18 +389,32 @@ readTile2D kind tile_id tile_size num_groups group_size get_arrs =
          toExp (primExpFromSubExp int32 tile_id *
                 primExpFromSubExp int32 tile_size +
                 LeafExp ltid_y int32)
+
+    ((gtid_x, gtid_y), arrs_and_perms) <- get_arrs ltid_x ltid_y
+    let (arrs, perms) = unzip arrs_and_perms
+    arr_ts <- mapM lookupType arrs
+    let tile_ts = map rowType arr_ts
+        w = arraysSize 0 arr_ts
+
     let readTileElem arr perm =
           -- No need for fullSlice because we are tiling only prims.
           letExp "tile_elem" $ BasicOp $ Index arr
           [DimFix $ last $ rearrangeShape perm [i,j]]
+        readTileElemIfInBounds (tile_t, arr, perm) = do
+          let idx = last $ rearrangeShape perm [i,j]
+              othercheck = head $ rearrangeShape perm
+                           [ LeafExp gtid_y int32 .<. primExpFromSubExp int32 kdim_y
+                           , LeafExp gtid_x int32 .<. primExpFromSubExp int32 kdim_x
+                           ]
+          eIf (toExp $
+               primExpFromSubExp int32 idx .<. primExpFromSubExp int32 w .&&. othercheck)
+            (eBody [return $ BasicOp $ Index arr [DimFix idx]])
+            (eBody [eBlank tile_t])
+
     fmap (map Var) $
       case kind of
         TilePartial ->
-          letTupExp "pre" =<< eIf (toExp $
-                                   primExpFromSubExp int32 i .<. primExpFromSubExp int32 w .&&.
-                                   primExpFromSubExp int32 j .<. primExpFromSubExp int32 w)
-          (resultBody . map Var <$> zipWithM readTileElem arrs perms)
-          (eBody $ map eBlank tile_ts)
+          mapM (letExp "pre" <=< readTileElemIfInBounds) (zip3 tile_ts arrs perms)
         TileFull ->
           zipWithM readTileElem arrs perms
 
@@ -479,7 +488,7 @@ processResidualTile2D
     nonemptyTile residual_input = renameBody <=< runBodyBinder $ do
       -- Collectively construct a tile.  Threads that are out-of-bounds
       -- provide a blank dummy value.
-      full_tile <- readTile2D TilePartial num_whole_tiles tile_size num_groups group_size $ \ltid_x ltid_y -> do
+      full_tile <- readTile2D TilePartial kdim_x kdim_y num_whole_tiles tile_size num_groups group_size $ \ltid_x ltid_y -> do
           -- Reconstruct the original gtids from gid_x/gid_y and ltid_x/ltid_y.
           gtid_x' <- letExp "gtid_x" =<<
                      toExp (LeafExp gid_x int32 * primExpFromSubExp int32 tile_size +
@@ -489,7 +498,7 @@ processResidualTile2D
                             LeafExp ltid_y int32)
           let gtid_substs = M.fromList [(gtid_x, gtid_x'), (gtid_y, gtid_y')]
           addStms $ substituteNames gtid_substs prestms
-          return arrs_and_perms
+          return ((gtid_x', gtid_y'), arrs_and_perms)
 
       tile <- forM full_tile $ \tile ->
         letExp "partial_tile" $ BasicOp $ Index tile
@@ -574,7 +583,7 @@ tile2D initial_lvl prestms res_ts pat (gtid_x, kdim_x) (gtid_y, kdim_y) w form a
                   localScope (scopeOfFParams $ map fst merge) $ do
 
         -- Collectively read a tile.
-        tile <- readTile2D TileFull (Var tile_id) tile_size
+        tile <- readTile2D TileFull kdim_x kdim_y (Var tile_id) tile_size
                 (segNumGroups initial_lvl) (segGroupSize initial_lvl) $ \ltid_x ltid_y -> do
           -- Reconstruct the original gtids from gid_x/gid_y and ltid_x/ltid_y.
           gtid_x' <- letExp "gtid_x" =<<
@@ -585,7 +594,7 @@ tile2D initial_lvl prestms res_ts pat (gtid_x, kdim_x) (gtid_y, kdim_y) w form a
                             LeafExp ltid_y int32)
           let gtid_substs = M.fromList [(gtid_x, gtid_x'), (gtid_y, gtid_y')]
           addStms $ substituteNames gtid_substs prestms
-          return arrs_and_perms
+          return ((gtid_x', gtid_y'), arrs_and_perms)
 
         -- Now each thread performs a traversal of the tile and
         -- updates its accumulator.
