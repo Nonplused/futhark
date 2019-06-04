@@ -22,6 +22,7 @@ module Futhark.Pass.ExtractKernels.BlockedKernel
        where
 
 import Control.Monad
+import Control.Monad.Writer
 import Data.List
 
 import Prelude hiding (quot)
@@ -85,7 +86,7 @@ prepareRedOrScan w map_lam arrs ispace inps = do
   gtid <- newVName "gtid"
   space <- mkSegSpace $ ispace ++ [(gtid, w)]
   kbody <- fmap (uncurry (flip (KernelBody ()))) $ runBinder $
-          localScope (scopeOfSegSpace space) $ do
+           localScope (scopeOfSegSpace space) $ do
     mapM_ (addStm <=< readKernelInput) inps
     forM_ (zip (lambdaParams map_lam) arrs) $ \(p, arr) -> do
       arr_t <- lookupType arr
@@ -371,6 +372,13 @@ blockedKernelSize w = do
   return (max_num_groups,
           KernelSize num_groups' group_size per_thread_elements w num_threads')
 
+createsArrays :: KernelBody Kernels -> Bool
+createsArrays = getAny . execWriter . mapM_ onStm . kernelBodyStms
+  where onStm stm = do
+          when (any (not . primType) $ patternTypes $ stmPattern stm) $ tell $ Any True
+          walkExpM walker $ stmExp stm
+        walker = identityWalker { walkOnBody = mapM_ onStm . bodyStms }
+
 mapKernelSkeleton :: (HasScope Kernels m, MonadFreshNames m) =>
                      [(VName, SubExp)] -> [KernelInput]
                   -> m (SegSpace, Stms Kernels)
@@ -384,14 +392,23 @@ mapKernel :: (HasScope Kernels m, MonadFreshNames m) =>
              SubExp -> [(VName, SubExp)] -> [KernelInput]
           -> [Type] -> KernelBody Kernels
           -> m (SegOp Kernels, Stms Kernels)
-mapKernel w ispace inputs rts (KernelBody () kstms krets) = runBinder $ do
+mapKernel w ispace inputs rts kbody@(KernelBody () kstms krets) = runBinder $ do
   (space, read_input_stms) <- mapKernelSkeleton ispace inputs
 
   let kbody' = KernelBody () (read_input_stms <> kstms) krets
 
   group_size <- getSize "segmap_group_size" SizeGroup
-  num_groups <- letSubExp "segmap_num_groups" =<<
-                eDivRoundingUp Int32 (eSubExp w) (eSubExp group_size)
+
+  num_groups <-
+    -- If the kernel creates arrays internally (meaning it will
+    -- require memory expansion), we want to truncate the amount of
+    -- threads.  Otherwise, have at it!  This is a bit of a hack - in
+    -- principle, we should make this decision later, when we have a
+    -- clearer idea of what is happening inside the kernel.
+    if not $ createsArrays kbody
+    then letSubExp "segmap_num_groups" =<<
+         eDivRoundingUp Int32 (eSubExp w) (eSubExp group_size)
+    else getSize "segmap_num_groups" SizeNumGroups
 
   let lvl = SegThread (Count num_groups) (Count group_size)
   return $ SegMap lvl space rts kbody'

@@ -663,7 +663,6 @@ instance PrettyLore lore => PP.Pretty (SegOp lore) where
 instance Attributes inner => RangedOp (SegOp inner) where
   opRanges op = replicate (length $ segOpType op) unknownRange
 
-
 instance (Attributes lore, CanBeRanged (Op lore)) => CanBeRanged (SegOp lore) where
   type OpWithRanges (SegOp lore) = SegOp (Ranges lore)
 

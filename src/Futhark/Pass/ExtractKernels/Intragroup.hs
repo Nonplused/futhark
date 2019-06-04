@@ -83,7 +83,6 @@ intraGroupParallelise knest lam = runMaybeT $ do
         used_inps = filter inputIsUsed inps
 
     addStms w_stms
-
     read_input_stms <- mapM readKernelInput used_inps
     space <- mkSegSpace ispace
     return (intra_avail_par, space, read_input_stms)

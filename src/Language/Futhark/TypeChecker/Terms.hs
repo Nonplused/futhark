@@ -330,6 +330,11 @@ instance MonadTypeChecker TermTypeM where
               (map (maybe (toStruct argtype) Prim) pts,
                maybe (toStruct argtype) Prim rt)
 
+  checkNamedDim loc v = do
+    (v', t) <- lookupVar loc v
+    unify loc (toStructural t) (Prim $ Signed Int32)
+    return v'
+
 checkQualNameWithEnv :: Namespace -> QualName Name -> SrcLoc -> TermTypeM (TermScope, QualName VName)
 checkQualNameWithEnv space qn@(QualName [q] _) loc
   | nameToString q == "intrinsics" = do
@@ -1030,9 +1035,9 @@ checkExp (Assert e1 e2 NoInfo loc) = do
   e2' <- checkExp e2
   return $ Assert e1' e2' (Info (pretty e1)) loc
 
-checkExp (Lambda tparams params body rettype_te NoInfo loc) =
+checkExp (Lambda params body rettype_te NoInfo loc) =
   removeSeminullOccurences $
-  bindingPatternGroup tparams params $ \tparams' params' -> do
+  bindingPatternGroup [] params $ \_ params' -> do
     rettype_checked <- traverse checkTypeExp rettype_te
     let declared_rettype =
           case rettype_checked of Just (_, st, _) -> Just st
@@ -1049,7 +1054,7 @@ checkExp (Lambda tparams params body rettype_te NoInfo loc) =
 
     closure' <- lexicalClosure params' closure
 
-    return $ Lambda tparams' params' body' rettype' (Info (closure', rettype_st)) loc
+    return $ Lambda params' body' rettype' (Info (closure', rettype_st)) loc
 
 checkExp (OpSection op _ loc) = do
   (op', ftype) <- lookupVar loc op
