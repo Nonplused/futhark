@@ -52,7 +52,7 @@ optimiseStm stm@(Let pat aux (Op (SegOp (SegMap lvl@SegThread{} space ts kbody))
 
 optimiseStm (Let pat aux e) =
   pure <$> (Let pat aux <$> mapExpM optimise e)
-  where optimise = identityMapper { mapOnBody = const optimiseBody }
+  where optimise = identityMapper { mapOnBody = \scope -> localScope scope . optimiseBody }
 
 tileInKernelBody :: Names -> VarianceTable
                  -> SegLevel -> SegSpace -> [Type] -> KernelBody Kernels
@@ -402,7 +402,7 @@ readTile2D kind kdim_x kdim_y tile_id tile_size num_groups group_size get_arrs =
           [DimFix $ last $ rearrangeShape perm [i,j]]
         readTileElemIfInBounds (tile_t, arr, perm) = do
           let idx = last $ rearrangeShape perm [i,j]
-              othercheck = head $ rearrangeShape perm
+              othercheck = last $ rearrangeShape perm
                            [ LeafExp gtid_y int32 .<. primExpFromSubExp int32 kdim_y
                            , LeafExp gtid_x int32 .<. primExpFromSubExp int32 kdim_x
                            ]
